@@ -53,8 +53,6 @@ tasks.named('test') {
 tasks.named('bootJar') {
     // 도커빌드용 산출물 이름 고정
     archiveFileName = 'app.jar'
-    // 레이어 활성화(도커 캐시 효율)
-    layered = true
 }
 
 // (선택) 모든 JavaCompile에 UTF-8/빌드 재현성 옵션
