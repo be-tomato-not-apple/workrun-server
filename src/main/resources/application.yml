@@ -1,0 +1,27 @@
+spring:
+  batch:
+    jdbc:
+      initialize-schema: never
+    job:
+      enabled: false
+
+
+  profiles:
+    active: local # 여기에 local, blue, green 셋중 하나로 입력
+  config:
+    import:
+      - classpath:application-secret.yml
+  jpa:
+    hibernate:
+      ddl-auto: update # 여기
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Seoul
+        show_sql: true
+        highlight_sql : true
+
+logging:
+  level:
+    org.springframework.web: DEBUG
+    org.springframework.web.client.DefaultRestClient: OFF
