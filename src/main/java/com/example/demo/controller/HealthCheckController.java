@@ -9,30 +9,32 @@ import java.util.Map;
 import java.util.TreeMap;
 
 @RestController
-public class healthCheckController {
+public class HealthCheckController {
 
-    @Value("${server.env}")
+    @Value("${server.env:unknown}")
     private String env;
-    @Value("${server.port}")
+
+    @Value("${server.port:8080}")
     private String serverPort;
-    @Value("${server.serverAddress}")
+
+    @Value("${server.serverAddress:0.0.0.0}")
     private String serverAddress;
-    @Value("${serverName}")
+
+    @Value("${serverName:app}")
     private String serverName;
 
     @GetMapping("/hc")
     public ResponseEntity<?> healthCheck() {
-        Map<String, String> responseData = new TreeMap<>();
-        responseData.put("serverName", serverName);
-        responseData.put("serverAddress", serverAddress);
-        responseData.put("serverPort", serverPort);
-        responseData.put("env", env);
-
-        return ResponseEntity.ok(responseData);
+        Map<String, String> res = new TreeMap<>();
+        res.put("serverName", serverName);
+        res.put("serverAddress", serverAddress);
+        res.put("serverPort", serverPort);
+        res.put("env", env);
+        return ResponseEntity.ok(res);
     }
 
     @GetMapping("/env")
-    public ResponseEntity<?> getEnv() {
+    public ResponseEntity<String> getEnv() {
         return ResponseEntity.ok(env);
     }
 }
