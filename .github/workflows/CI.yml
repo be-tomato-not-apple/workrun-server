@@ -116,13 +116,13 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            for i in {1..24}; do
-              if curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/env" >/dev/null \
-                 || curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/env" >/dev/null; then
+            for i in {1..36}; do  # 최대 3분 대기
+              if curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc" >/dev/null \
+                 || curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc" >/dev/null; then
                 echo "new app is UP on ${{ env.STOPPED_PORT }}"
                 exit 0
               fi
-              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/24)"
+              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/36)"
               sleep 5
             done
             echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
