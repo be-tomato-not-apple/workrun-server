@@ -3,15 +3,9 @@ spring:
     # 기본은 로컬. EC2에서는 --spring.profiles.active=blue 또는 green 로 덮어쓰기
     active: local
     group:
-      local:
-        - local
-        - common
-      blue:
-        - blue
-        - common
-      green:
-        - green
-        - common
+      local: [local, common, secret]
+      blue:  [blue,  common, secret]
+      green: [green, common, secret]
 
 # ---- local ----------------------------------------------------
 ---
@@ -36,7 +30,8 @@ spring:
 server:
   env: blue
   port: 8080
-  serverAddress: 54.180.219.136   # ← EC2 공인 IP (필요시 변경)
+  address: 0.0.0.0
+  serverAddress: 54.180.219.136
 serverName: blue_server
 
 # ---- green (EC2) ---------------------------------------------
@@ -49,6 +44,7 @@ spring:
 server:
   env: green
   port: 8081
+  address: 0.0.0.0
   serverAddress: 54.180.219.136   # ← EC2 공인 IP (필요시 변경)
 serverName: green_server
 
@@ -58,8 +54,8 @@ spring:
   config:
     activate:
       on-profile: common
-      import:
-        - classpath:application-secret.yml   # DB 등 민감정보 분리
+#      import:
+#        - classpath:application-secret.yml   # DB 등 민감정보 분리
 
   batch:
     jdbc:
@@ -75,8 +71,7 @@ spring:
         jdbc:
           time_zone: Asia/Seoul
         show_sql: true
-        highlight_sql: true   # 하이버네이트 SQL 하이라이트
-        # format_sql: true
+        highlight_sql: true
 
 logging:
   level:
