@@ -48,36 +48,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Nginx의 service-env.inc에서 현재 upstream 조회 (nginx 컨테이너가 아직 없으면 green으로 가정)
-      - name: Detect current upstream on EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          username: ubuntu
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-      
-            # nginxserver가 "running" 상태인지 먼저 확인 (존재만 하는 컨테이너는 제외)
-            if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-              # 처음 배포이거나 nginx가 꺼져있으면 green으로 가정
-              UP=green
-            else
-              # docker exec 자체 실패를 무해화하려면 exec 뒤에 || true 를 '밖'에 둬야 함
-              UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null" || true)
-              [ -z "$UP" ] && UP=green
-            fi
-      
-            echo "CURRENT_UPSTREAM=$UP" >> $GITHUB_ENV
-            if [ "$UP" = "blue" ]; then
-              echo "CURRENT_PORT=8080"   >> $GITHUB_ENV
-              echo "STOPPED_PORT=8081"  >> $GITHUB_ENV
-              echo "TARGET_UPSTREAM=green" >> $GITHUB_ENV
-            else
-              echo "CURRENT_PORT=8081"  >> $GITHUB_ENV
-              echo "STOPPED_PORT=8080"  >> $GITHUB_ENV
-              echo "TARGET_UPSTREAM=blue"  >> $GITHUB_ENV
-            fi
-            echo "Detected CURRENT_UPSTREAM=$UP"
+    # 1) 현재 업스트림 감지 (네이티브 ssh 사용)
+    - name: Detect current upstream (native ssh)
+      id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+        # 비밀키 파일 생성
+        echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
+        chmod 600 id_rsa
+    
+        # 원격에서 업스트림 감지: nginxserver가 실행 중 아니면 green, 실행 중이면 env 파일에서 blue/green 추출
+        UP=$(ssh -o StrictHostKeyChecking=no -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
+          'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+             echo green
+           else
+             docker exec -i nginxserver bash -lc '\''grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'\''
+           fi')
+    
+        echo "Detected upstream on EC2: $UP"
+    
+        # Runner 측 GITHUB_ENV에 기록
+        echo "CURRENT_UPSTREAM=$UP" >> "$GITHUB_ENV"
+        if [ "$UP" = "blue" ]; then
+          echo "CURRENT_PORT=8080"   >> "$GITHUB_ENV"
+          echo "STOPPED_PORT=8081"  >> "$GITHUB_ENV"
+          echo "TARGET_UPSTREAM=green" >> "$GITHUB_ENV"
+        else
+          echo "CURRENT_PORT=8081"  >> "$GITHUB_ENV"
+          echo "STOPPED_PORT=8080"  >> "$GITHUB_ENV"
+          echo "TARGET_UPSTREAM=blue"  >> "$GITHUB_ENV"
+        fi
 
       - name: Set matrix env vars
         run: |
