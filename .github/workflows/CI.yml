@@ -55,14 +55,18 @@ jobs:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          capture_stdout: true
           script: |
             set -e
-            if ! sudo docker inspect -f '{{.State.Running}}' nginxserver >/dev/null 2>&1; then
+      
+            # 컨테이너 실행 상태를 문자열로 확인 (true/false)
+            RUNNING=$(sudo docker inspect -f '{{.State.Running}}' nginxserver 2>/dev/null || echo "false")
+            if [ "$RUNNING" != "true" ]; then
               echo green
               exit 0
             fi
-            UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null || true")
+      
+            # 파일에서 blue|green 추출 (없으면 green)
+            UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null | head -n1 || true")
             if [ -z "$UP" ]; then UP=green; fi
             echo "$UP"
 
@@ -71,9 +75,11 @@ jobs:
         run: |
           DETECTED="${{ steps.detect.outputs.stdout }}"
           DETECTED=$(echo "$DETECTED" | tr -d '\r\n' | xargs)
+      
           if [ "$DETECTED" != "blue" ] && [ "$DETECTED" != "green" ]; then
             DETECTED=green
           fi
+      
           echo "CURRENT_UPSTREAM=$DETECTED" >> $GITHUB_ENV
           if [ "$DETECTED" = "blue" ]; then
             echo "CURRENT_PORT=8080"   >> $GITHUB_ENV
@@ -84,8 +90,6 @@ jobs:
             echo "STOPPED_PORT=8080"  >> $GITHUB_ENV
             echo "TARGET_UPSTREAM=blue"  >> $GITHUB_ENV
           fi
-          echo "Will deploy to ${{ env.TARGET_UPSTREAM }} (port ${{
-            env.STOPPED_PORT }}) and then switch over."
 
       # 3) 대상 업스트림(blue/green) 기동: 이미지 풀 + 시크릿 파일 생성 + compose up
       - name: Deploy target upstream over SSH
