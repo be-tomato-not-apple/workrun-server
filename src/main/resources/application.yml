@@ -30,7 +30,6 @@ spring:
 server:
   env: blue
   port: 8080
-  address: 0.0.0.0
   serverAddress: 54.180.219.136
 serverName: blue_server
 
@@ -44,7 +43,6 @@ spring:
 server:
   env: green
   port: 8081
-  address: 0.0.0.0
   serverAddress: 54.180.219.136   # ← EC2 공인 IP (필요시 변경)
 serverName: green_server
 
