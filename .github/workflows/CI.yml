@@ -5,7 +5,6 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-  # 필요시 수동 실행도 허용
   workflow_dispatch: {}
 
 permissions:
@@ -49,25 +48,19 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # 1) 현재 업스트림(blue/green) 감지: 러너에서 네이티브 ssh 사용
       - name: Detect current upstream (native ssh)
         shell: bash
         run: |
           set -euo pipefail
-
-          # ssh 키 파일 생성
           echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
           chmod 600 id_rsa
-
-          # nginxserver 컨테이너 실행 여부 먼저 확인 후, 파일에서 blue/green 추출
           UP=$(ssh -o StrictHostKeyChecking=no -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
             'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                echo green
              else
                docker exec -i nginxserver bash -lc '\''grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'\''
              fi')
-
-          echo "Detected upstream on EC2: $UP"
+          echo "Detected upstream: $UP"
           echo "CURRENT_UPSTREAM=$UP" >> "$GITHUB_ENV"
           if [ "$UP" = "blue" ]; then
             echo "CURRENT_PORT=8080"   >> "$GITHUB_ENV"
@@ -79,7 +72,6 @@ jobs:
             echo "TARGET_UPSTREAM=blue"  >> "$GITHUB_ENV"
           fi
 
-      # 2) 대상 업스트림에 배포 (이미지 pull, secret 주입, compose up)
       - name: Deploy target upstream (pull, secret write, compose up)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -89,24 +81,31 @@ jobs:
           command_timeout: 20m
           script: |
             set -euo pipefail
-
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
-            # application-secret.yml 주입 (base64 -> 파일)
+            # secret 주입
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
 
-            # Compose v1/v2 호환 실행
+            # compose 파일이 있는 디렉터리로 이동 (필요에 맞게 수정)
+            cd /home/ubuntu
+            echo "Using compose file: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
+            ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
+
+            # compose v1/v2 호환 실행
             if command -v docker-compose >/dev/null 2>&1; then
               sudo docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             else
               sudo docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             fi
 
-      # 3) 새 타겟 앱 헬스체크 (EC2 내부에서 실행)
-      - name: Health check new target (on EC2)
+            # 기동 직후 짧은 대기 + 상태 덤프
+            sleep 3
+            sudo docker ps -a
+
+      - name: Health check new target (run on EC2)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -116,18 +115,17 @@ jobs:
             set -e
             for i in {1..24}; do
               if curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/env" >/dev/null; then
-                echo "New app is UP on ${{ env.STOPPED_PORT }}"
+                echo "new app is UP on ${{ env.STOPPED_PORT }}"
                 exit 0
               fi
-              echo "Waiting new app on ${{ env.STOPPED_PORT }} ... ($i/24)"
+              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/24)"
               sleep 5
             done
-            echo "Healthcheck failed on ${{ env.STOPPED_PORT }}"
+            echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
             sudo docker ps -a
             sudo docker logs --tail=200 ${{ env.TARGET_UPSTREAM }} || true
             exit 1
 
-      # 4) Nginx 업스트림 전환
       - name: Switch nginx upstream
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -138,7 +136,6 @@ jobs:
             set -e
             sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -s reload'
 
-      # 5) 이전 업스트림 종료(첫 배포면 없어도 통과)
       - name: Stop old upstream (ignore if first deploy)
         uses: appleboy/ssh-action@v1.0.3
         with:
