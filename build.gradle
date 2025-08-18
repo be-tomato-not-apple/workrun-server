@@ -37,6 +37,9 @@ dependencies {
     // 운영: MySQL (프로필에서 URL 주면 이 드라이버가 사용됨)
     runtimeOnly 'com.mysql:mysql-connector-j'
 
+    // Swagger
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.9'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
