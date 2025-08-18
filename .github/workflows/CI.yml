@@ -34,7 +34,6 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        # Dockerfile이 ARG JAR_FILE을 받는 경우를 대비 (Gradle 산출물 경로)
         run: |
           docker build \
             --build-arg JAR_FILE=build/libs/*.jar \
@@ -48,27 +47,48 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Detect upstream via SSH (fallback or replacement)
+      # 1) 원격에서 현재 업스트림 감지(nginxserver 없거나 파일 없으면 green 출력)
+      - name: Detect upstream via SSH (print only)
+        id: detect
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          capture_stdout: true
           script: |
+            set -e
+            if ! sudo docker inspect -f '{{.State.Running}}' nginxserver >/dev/null 2>&1; then
+              echo green
+              exit 0
+            fi
             UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null || true")
             if [ -z "$UP" ]; then UP=green; fi
-            echo "CURRENT_UPSTREAM=$UP" >> $GITHUB_ENV
-            if [ "$UP" = "blue" ]; then
-              echo "CURRENT_PORT=8080"   >> $GITHUB_ENV
-              echo "STOPPED_PORT=8081"  >> $GITHUB_ENV
-              echo "TARGET_UPSTREAM=green" >> $GITHUB_ENV
-            else
-              echo "CURRENT_PORT=8081"  >> $GITHUB_ENV
-              echo "STOPPED_PORT=8080"  >> $GITHUB_ENV
-              echo "TARGET_UPSTREAM=blue"  >> $GITHUB_ENV
-            fi
+            echo "$UP"
 
-      - name: Deploy target upstream over SSH (pull image, write secret file, up)
+      # 2) 러너(로컬)에서 env 세팅
+      - name: Set env from detected upstream
+        run: |
+          DETECTED="${{ steps.detect.outputs.stdout }}"
+          DETECTED=$(echo "$DETECTED" | tr -d '\r\n' | xargs)
+          if [ "$DETECTED" != "blue" ] && [ "$DETECTED" != "green" ]; then
+            DETECTED=green
+          fi
+          echo "CURRENT_UPSTREAM=$DETECTED" >> $GITHUB_ENV
+          if [ "$DETECTED" = "blue" ]; then
+            echo "CURRENT_PORT=8080"   >> $GITHUB_ENV
+            echo "STOPPED_PORT=8081"  >> $GITHUB_ENV
+            echo "TARGET_UPSTREAM=green" >> $GITHUB_ENV
+          else
+            echo "CURRENT_PORT=8081"  >> $GITHUB_ENV
+            echo "STOPPED_PORT=8080"  >> $GITHUB_ENV
+            echo "TARGET_UPSTREAM=blue"  >> $GITHUB_ENV
+          fi
+          echo "Will deploy to ${{ env.TARGET_UPSTREAM }} (port ${{
+            env.STOPPED_PORT }}) and then switch over."
+
+      # 3) 대상 업스트림(blue/green) 기동: 이미지 풀 + 시크릿 파일 생성 + compose up
+      - name: Deploy target upstream over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -77,23 +97,22 @@ jobs:
           command_timeout: 20m
           script: |
             set -euo pipefail
-
-            # 1) DockerHub 로그인 & 최신 이미지 pull
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
-            # 2) base64 로 전달된 application-secret.yml 파일 생성
+            # application-secret.yml 주입
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
 
-            # 3) docker compose up (v1/v2 호환), 불필요 컨테이너 제거
+            # compose v1/v2 호환 실행
             if command -v docker-compose >/dev/null 2>&1; then
               sudo docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             else
               sudo docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             fi
 
+      # 4) 새 타겟 헬스체크 (STOPPED_PORT = 새 타겟 포트)
       - name: Health check new target
         uses: jtalk/url-health-check-action@v3
         with:
@@ -101,6 +120,7 @@ jobs:
           max-attempts: 6
           retry-delay: 10s
 
+      # 5) Nginx 업스트림 전환
       - name: Switch nginx upstream
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -108,8 +128,9 @@ jobs:
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -s reload'
+            sudo docker exec -i nginxserver bash -lc 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -s reload'
 
+      # 6) 기존 업스트림 종료(첫 배포면 없어도 무시)
       - name: Stop old upstream (ignore if first deploy)
         uses: appleboy/ssh-action@v1.0.3
         with:
