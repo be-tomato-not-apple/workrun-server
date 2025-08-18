@@ -49,7 +49,6 @@ jobs:
     steps:
       # Nginx의 service-env.inc에서 현재 upstream 조회 (nginx 컨테이너가 아직 없으면 green으로 가정)
       - name: Detect current upstream on EC2
-        id: detect
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -57,14 +56,28 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            if ! sudo docker inspect -f '{{.State.Running}}' nginxserver >/dev/null 2>&1; then
-              echo "green" > upstream.txt
+      
+            # nginxserver가 "running" 상태인지 먼저 확인 (존재만 하는 컨테이너는 제외)
+            if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+              # 처음 배포이거나 nginx가 꺼져있으면 green으로 가정
+              UP=green
             else
-              UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null || true")
+              # docker exec 자체 실패를 무해화하려면 exec 뒤에 || true 를 '밖'에 둬야 함
+              UP=$(sudo docker exec -i nginxserver bash -lc "grep -oE '(blue|green)' /etc/nginx/conf.d/service-env.inc 2>/dev/null" || true)
               [ -z "$UP" ] && UP=green
-              echo "$UP" > upstream.txt
             fi
-            cat upstream.txt
+      
+            echo "CURRENT_UPSTREAM=$UP" >> $GITHUB_ENV
+            if [ "$UP" = "blue" ]; then
+              echo "CURRENT_PORT=8080"   >> $GITHUB_ENV
+              echo "STOPPED_PORT=8081"  >> $GITHUB_ENV
+              echo "TARGET_UPSTREAM=green" >> $GITHUB_ENV
+            else
+              echo "CURRENT_PORT=8081"  >> $GITHUB_ENV
+              echo "STOPPED_PORT=8080"  >> $GITHUB_ENV
+              echo "TARGET_UPSTREAM=blue"  >> $GITHUB_ENV
+            fi
+            echo "Detected CURRENT_UPSTREAM=$UP"
 
       - name: Set matrix env vars
         run: |
