@@ -17,6 +17,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @Tag(name = "복지정책 API", description = "복지정책 관련 API")
 @RestController
 @RequiredArgsConstructor
@@ -41,6 +43,20 @@ public class WelfareController {
         log.info("복지정책 목록 조회 API 호출 (Cursor 방식) - cursor: {}, size: {}", cursor, size);
 
         CursorPageResponse<WelfareSummaryDTO> welfares = welfareService.getWelfares(cursor, size);
+        return ResponseEntity.ok(ApiResponse.success(welfares));
+    }
+
+    @Operation(summary = "복지정책 전체 목록 조회", description = "모든 복지정책 목록을 한번에 조회합니다.")
+    @ApiResponses(value = {
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "성공"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "500", description = "서버 오류")
+    })
+    @GetMapping("/all")
+    public ResponseEntity<ApiResponse<List<WelfareSummaryDTO>>> getAllWelfares() {
+
+        log.info("복지정책 전체 목록 조회 API 호출");
+
+        List<WelfareSummaryDTO> welfares = welfareService.getAllWelfares();
         return ResponseEntity.ok(ApiResponse.success(welfares));
     }
 

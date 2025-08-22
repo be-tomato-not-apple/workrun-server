@@ -4,6 +4,8 @@ import com.example.demo.dto.welfareDetailDTO;
 import com.example.demo.web.dto.CursorPageResponse;
 import com.example.demo.web.dto.WelfareSummaryDTO;
 
+import java.util.List;
+
 public interface WelfareService {
     welfareDetailDTO getDetailById(Long id);
 
@@ -11,4 +13,9 @@ public interface WelfareService {
      * 복지정책 목록 조회 (Cursor 방식)
      */
     CursorPageResponse<WelfareSummaryDTO> getWelfares(Long cursor, int size);
+
+    /**
+     * 복지정책 전체 목록 조회 (페이징 없음)
+     */
+    List<WelfareSummaryDTO> getAllWelfares();
 }
