@@ -105,58 +105,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # --- 공통: 현재 업스트림/포트 계산 (원격에서 계산 후 출력) ---
-      - name: Detect upstream & export ports
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          username: ubuntu
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 30s
-          command_timeout: 60s
-          debug: true
-          script: |
-            set -Eeuo pipefail
-            exec {BASH_XTRACEFD}>&2; set -x
-            detect_upstream() {
-              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-                echo green
-              else
-                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
-              fi
-            }
-            UP=$(detect_upstream)
-            echo "CURRENT_UPSTREAM=$UP" | tee current.env
-            if [ "$UP" = "blue" ]; then
-              echo "CURRENT_PORT=8080"   | tee -a current.env
-              echo "STOPPED_PORT=8081"  | tee -a current.env
-              echo "TARGET_UPSTREAM=green" | tee -a current.env
-            else
-              echo "CURRENT_PORT=8081"   | tee -a current.env
-              echo "STOPPED_PORT=8080"   | tee -a current.env
-              echo "TARGET_UPSTREAM=blue" | tee -a current.env
-            fi
-            cat current.env
-      - name: Fetch env from EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "current.env"
-          target: "./"
-      - name: Load env
-        run: |
-          set -e
-          cat current.env
-          export $(grep -E '^[A-Z_]+=.*' current.env | xargs -d '\n')
-          echo "CURRENT_UPSTREAM=$CURRENT_UPSTREAM" >> "$GITHUB_ENV"
-          echo "CURRENT_PORT=$CURRENT_PORT" >> "$GITHUB_ENV"
-          echo "STOPPED_PORT=$STOPPED_PORT" >> "$GITHUB_ENV"
-          echo "TARGET_UPSTREAM=$TARGET_UPSTREAM" >> "$GITHUB_ENV"
-  
-      # --- 1) Deploy target upstream ---
+      # --- 1) Deploy target (login/pull/secret/compose up) ---
       - name: 1) Deploy target (login/pull/secret/compose up)
+      # 각 단계에서 upstream/ports 재감지
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -165,10 +116,25 @@ jobs:
           timeout: 30s
           command_timeout: 10m
           debug: true
-          envs: TARGET_UPSTREAM,STOPPED_PORT
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
+  
+            detect_upstream() {
+              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+                echo green
+              else
+                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
+              fi
+            }
+            UP=$(detect_upstream)
+            echo "Detected upstream: $UP"
+            if [ "$UP" = "blue" ]; then
+              CURRENT_UPSTREAM=blue; CURRENT_PORT=8080; STOPPED_PORT=8081; TARGET_UPSTREAM=green
+            else
+              CURRENT_UPSTREAM=green; CURRENT_PORT=8081; STOPPED_PORT=8080; TARGET_UPSTREAM=blue
+            fi
+  
             T=15
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo timeout $T docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo timeout 120 docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
@@ -198,10 +164,25 @@ jobs:
           timeout: 30s
           command_timeout: 2m
           debug: true
-          envs: TARGET_UPSTREAM,STOPPED_PORT
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
+  
+            detect_upstream() {
+              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+                echo green
+              else
+                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
+              fi
+            }
+            UP=$(detect_upstream)
+            if [ "$UP" = "blue" ]; then
+              STOPPED_PORT=8081; TARGET_UPSTREAM=green
+            else
+              STOPPED_PORT=8080; TARGET_UPSTREAM=blue
+            fi
+            echo "Healthcheck target: ${TARGET_UPSTREAM} on ${STOPPED_PORT}"
+  
             URLS=("http://127.0.0.1:${STOPPED_PORT}/hc" "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc")
             ok=false
             for i in $(seq 1 10); do
@@ -213,8 +194,8 @@ jobs:
             done
             if [ "$ok" != true ]; then
               echo "healthcheck FAILED. dumping logs..."
-              sudo docker ps -a || true
-              sudo docker logs --tail=200 "${TARGET_UPSTREAM}" || true
+              sudo timeout 10 docker ps -a || true
+              sudo timeout 10 docker logs --tail=200 "${TARGET_UPSTREAM}" || true
               exit 1
             fi
   
@@ -228,10 +209,24 @@ jobs:
           timeout: 30s
           command_timeout: 60s
           debug: true
-          envs: TARGET_UPSTREAM
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
+  
+            detect_upstream() {
+              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+                echo green
+              else
+                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
+              fi
+            }
+            UP=$(detect_upstream)
+            if [ "$UP" = "blue" ]; then
+              TARGET_UPSTREAM=green
+            else
+              TARGET_UPSTREAM=blue
+            fi
+  
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
               sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload"
             else
@@ -248,8 +243,22 @@ jobs:
           timeout: 30s
           command_timeout: 60s
           debug: true
-          envs: CURRENT_UPSTREAM
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-            sudo docker rm -f "${CURRENT_UPSTREAM}" || true
+  
+            detect_upstream() {
+              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+                echo green
+              else
+                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
+              fi
+            }
+            # 전환 직후 현재 업스트림은 TARGET이 되었으니, 반대편을 정리
+            UP=$(detect_upstream)
+            if [ "$UP" = "blue" ]; then
+              OLD=green
+            else
+              OLD=blue
+            fi
+            sudo docker rm -f "$OLD" || true
