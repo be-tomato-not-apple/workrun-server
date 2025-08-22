@@ -14,13 +14,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: "temurin"
           cache: gradle
 
       - name: Build with Gradle (skip tests)
@@ -48,7 +49,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # 0) (옵션) nginx 보장 - 없으면 만들고, 있으면 start
       - name: Ensure nginx is running (robust)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -70,28 +70,28 @@ jobs:
 
               # app.conf (blue/green upstream + /env)
               cat <<'EOF' | sudo tee /home/ubuntu/nginx/conf.d/app.conf >/dev/null
-upstream blue  { server 127.0.0.1:8080; }
-upstream green { server 127.0.0.1:8081; }
-
-server {
-  listen 80;
-
-  include /etc/nginx/conf.d/service-env.inc;
-
-  location / {
-    proxy_pass http://$service_url;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-
-  location = /env {
-    default_type text/plain;
-    return 200 "$service_url\n";
-  }
-}
-EOF
+              upstream blue  { server 127.0.0.1:8080; }
+              upstream green { server 127.0.0.1:8081; }
+              
+              server {
+                listen 80;
+              
+                include /etc/nginx/conf.d/service-env.inc;
+              
+                location / {
+                  proxy_pass http://$service_url;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                }
+              
+                location = /env {
+                  default_type text/plain;
+                  return 200 "$service_url\n";
+                }
+              }
+              EOF
 
               # 기본 선택 값 (최초 deploy 가정)
               echo 'set $service_url green;' | sudo tee /home/ubuntu/nginx/conf.d/service-env.inc >/dev/null
@@ -103,7 +103,6 @@ EOF
             fi
             sudo docker ps -a
 
-      # 1) 현재 업스트림 감지(nginx 없거나 꺼져있으면 green 가정)
       - name: Detect current upstream (native ssh, hardened)
         shell: bash
         run: |
@@ -123,6 +122,7 @@ EOF
                    sudo docker exec -i nginxserver bash -lc '\''grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'\''
                  fi' || echo "green"
           )
+
           [ -z "$UP" ] && UP=green
           echo "Detected upstream on EC2: $UP"
 
@@ -139,7 +139,6 @@ EOF
             fi
           } >> "$GITHUB_ENV"
 
-      # 2) 대상 업스트림 컨테이너 기동
       - name: Deploy target upstream (pull, secret write, compose up)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -170,8 +169,17 @@ EOF
             sleep 2
             sudo -n docker ps -a
 
-      # 3) 헬스체크 (퍼블릭 IP 우선, 실패 시 로컬)
       - name: Health check new target (run on EC2; public IP first)
+        uses: jtalk/url-health-check-action@v3
+        with:
+          url: http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc
+          max-attempts: 36
+          retry-delay: 5s
+          follow-redirect: false
+          retry-all: false
+
+      - name: Health check fallback (inside EC2, localhost)
+        if: failure()
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -179,21 +187,19 @@ EOF
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            for i in {1..36}; do  # 최대 3분
-              if curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc" >/dev/null \
-                 || curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc" >/dev/null; then
-                echo "new app is UP on ${{ env.STOPPED_PORT }}"
+            for i in {1..12}; do
+              if curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc" >/dev/null; then
+                echo "new app is UP on ${{ env.STOPPED_PORT }} (localhost)"
                 exit 0
               fi
-              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/36)"
+              echo "waiting app on localhost:${{ env.STOPPED_PORT }} ... ($i/12)"
               sleep 5
             done
-            echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
+            echo "healthcheck failed on localhost:${{ env.STOPPED_PORT }}"
             sudo docker ps -a
             sudo docker logs --tail=200 ${{ env.TARGET_UPSTREAM }} || true
             exit 1
 
-      # 4) Nginx 업스트림 전환
       - name: Switch nginx upstream (if running)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -208,7 +214,6 @@ EOF
               echo "nginxserver not running. skip reload."
             fi
 
-      # 5) 이전 업스트림 종료(첫 배포면 없어도 통과)
       - name: Stop old upstream (ignore if first deploy)
         uses: appleboy/ssh-action@v1.0.3
         with:
