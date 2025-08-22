@@ -47,6 +47,9 @@ dependencies {
     // 엑셀 파싱용
     implementation 'org.apache.poi:poi:5.2.5'
     implementation 'org.apache.poi:poi-ooxml:5.2.5'
+
+    // csv 설정
+    implementation 'com.opencsv:opencsv:5.9'
 }
 
 tasks.named('test') {
