@@ -92,6 +92,17 @@ public class WelfareServiceImpl implements WelfareService {
         return CursorPageResponse.of(content, nextCursor, hasNext);
     }
 
+    @Override
+    public List<WelfareSummaryDTO> getAllWelfares() {
+        log.info("복지정책 전체 목록 조회");
+
+        List<Welfare> welfares = welfareRepository.findAllWithDetails();
+
+        return welfares.stream()
+                .map(this::convertToSummaryDTO)
+                .collect(Collectors.toList());
+    }
+
     private WelfareSummaryDTO convertToSummaryDTO(Welfare welfare) {
         List<String> homeStatusList = welfare.getHomeStatusList().stream()
                 .map(whs -> whs.getHomeStatus().getContent())

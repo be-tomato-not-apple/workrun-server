@@ -27,4 +27,12 @@ public interface WelfareRepository extends JpaRepository<Welfare, Long> {
             "WHERE (:cursor IS NULL OR w.id < :cursor) " +
             "ORDER BY w.id DESC")
     List<Welfare> findWithCursor(@Param("cursor") Long cursor, Pageable pageable);
+
+    @Query("SELECT DISTINCT w FROM Welfare w " +
+            "LEFT JOIN FETCH w.homeStatusList whs " +
+            "LEFT JOIN FETCH whs.homeStatus " +
+            "LEFT JOIN FETCH w.interestList wit " +
+            "LEFT JOIN FETCH wit.interestTopic " +
+            "ORDER BY w.id DESC")
+    List<Welfare> findAllWithDetails();
 }
