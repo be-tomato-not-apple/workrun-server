@@ -72,18 +72,19 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # ⬅️ PR이면 전체 잡 스킵
+    # ⬇️⬇️⬇️ 여기!! 메인 브랜치로의 push일 때만 배포 잡 실행
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # 1) 현재 업스트림 감지(러너에서 native ssh) — 타임아웃 옵션 추가
       - name: Detect current upstream (native ssh)
+        # 스텝 레벨에서도 한 번 더 방지망 (중복 가드)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
           echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
           chmod 600 id_rsa
-          # ❗ fail-fast: connect/keepalive 옵션
-          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=8 -o ConnectionAttempts=1 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o IPQoS=none"
           UP=$(ssh $SSH_OPTS -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
             'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                echo green
@@ -102,7 +103,6 @@ jobs:
             echo "TARGET_UPSTREAM=blue"  >> "$GITHUB_ENV"
           fi
 
-      # 2) 대상 업스트림 컨테이너 기동 (이미지 pull, secret 파일 주입, compose up)
       - name: Deploy target upstream (pull, secret write, compose up)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -112,30 +112,22 @@ jobs:
           command_timeout: 20m
           script: |
             set -Eeuo pipefail
-            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
-
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-
             cd /home/ubuntu
-            echo "Compose: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-            ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             if command -v docker-compose >/dev/null 2>&1; then
               sudo -E docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             else
               sudo -E docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             fi
-
             sleep 2
             sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
-      # 3) 헬스체크(재시도/타임아웃 강화)
-      - name: Health check new target (retry & rich diagnostics)
+      - name: Health check new target (retry & logs)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -144,40 +136,20 @@ jobs:
           command_timeout: 5m
           script: |
             set -Eeuo pipefail
-            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
-
-            PORT=${{ env.STOPPED_PORT }}
-            TARGET=${{ env.TARGET_UPSTREAM }}
-            echo "Health target: $TARGET on $PORT"
-
-            HC_OK=false
+            PORT=${{ env.STOPPED_PORT }}; TARGET=${{ env.TARGET_UPSTREAM }}
+            ok=false
             for i in $(seq 1 40); do
               for u in "http://127.0.0.1:${PORT}/hc" "http://127.0.0.1:${PORT}/actuator/health"; do
-                echo "[$i] Trying $u ..."
-                if curl -fsS --max-time 3 "$u" >/dev/null; then
-                  echo "✅ $u OK"
-                  HC_OK=true
-                  break
-                fi
+                if curl -fsS --max-time 3 "$u" >/dev/null; then ok=true; break; fi
               done
-              [ "$HC_OK" = true ] && break
-              if [ $((i % 10)) -eq 0 ]; then
-                echo "[diag] docker ps snapshot:"
-                sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-                echo "[diag] last 50 logs of $TARGET:"
-                sudo docker logs --tail=50 "$TARGET" || true
-              fi
+              [ "$ok" = true ] && break
               sleep 3
             done
-
-            if [ "$HC_OK" != true ]; then
-              echo "❌ healthcheck failed on ${PORT}. final diagnostics..."
-              sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            if [ "$ok" != true ]; then
               sudo docker logs --tail=200 "${TARGET}" || true
               exit 1
             fi
 
-      # 4) Nginx 업스트림 전환(nginxserver 실행 중일 때만)
       - name: Switch nginx upstream (if running)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -192,7 +164,6 @@ jobs:
               echo "nginxserver not running. skip reload."
             fi
 
-      # 5) 이전 업스트림 종료(첫 배포면 없어도 통과)
       - name: Stop old upstream (ignore if first deploy)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -201,3 +172,4 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             sudo docker rm -f ${{ env.CURRENT_UPSTREAM }} || true
+
