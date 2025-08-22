@@ -177,19 +177,20 @@ jobs:
             fi
 
       # --- 2) Healthcheck only (두 경로 시도) ---
-      - name: 2) Healthcheck (fail-fast with logs + image revision)
+      - name: 2) Healthcheck (retry + rich diagnostics)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
           timeout: 30s
-          command_timeout: 3m
+          command_timeout: 4m
           debug: true
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-
+      
+            # 대상 업스트림/포트 결졍
             if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
               UP=green
             else
@@ -201,24 +202,36 @@ jobs:
               STOPPED_PORT=8080; TARGET=blue
             fi
             echo "Health target: $TARGET on $STOPPED_PORT"
-
-            # 컨테이너/포트/이미지 라벨 확인
+      
+            # 기동 직후 상태 확인
             sudo docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+      
+            # 컨테이너 안에 JAR/리스너 존재 여부를 먼저 본다
             if sudo docker ps -q -f name=^$TARGET$ >/dev/null; then
-              CID=$(sudo docker ps -q -f name=^$TARGET$)
-              IMG_ID=$(sudo docker inspect -f '{{.Image}}' "$CID")
-              echo "Container $TARGET uses image id: $IMG_ID"
-              sudo docker inspect "$CID" --format '{{json .Config.Labels}}' || true
+              sudo docker exec -i "$TARGET" sh -lc 'ls -lh /app || true; ss -ltnp 2>/dev/null | grep ":8080" || netstat -ltnp 2>/dev/null | grep ":8080" || true'
             fi
-
-            # 앱 헬스 경로 2종 시도
+      
+            # 재시도 루프 (최대 40회, 약 2분)
             HC_OK=false
-            for u in "http://127.0.0.1:${STOPPED_PORT}/hc" "http://127.0.0.1:${STOPPED_PORT}/actuator/health"; do
-              echo "Trying $u ..."
-              if curl -fsS --max-time 3 "$u" >/dev/null; then echo "✅ $u OK"; HC_OK=true; break; fi
+            for i in $(seq 1 40); do
+              for u in "http://127.0.0.1:${STOPPED_PORT}/hc" "http://127.0.0.1:${STOPPED_PORT}/actuator/health"; do
+                echo "[$i] Trying $u ..."
+                if curl -fsS --max-time 3 "$u" >/dev/null; then echo "✅ $u OK"; HC_OK=true; break; fi
+              done
+              [ "$HC_OK" = true ] && break
+              # 중간 중간 상태 덤프 (10회마다)
+              if [ $((i % 10)) -eq 0 ]; then
+                echo "[diag] docker ps snapshot:"
+                sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+                echo "[diag] last 50 logs of $TARGET:"
+                sudo docker logs --tail=50 "$TARGET" || true
+              fi
+              sleep 3
             done
+      
             if [ "$HC_OK" != true ]; then
-              echo "❌ healthcheck failed on $STOPPED_PORT. dumping logs..."
+              echo "❌ healthcheck failed on ${STOPPED_PORT}. final diagnostics..."
+              sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
               sudo docker logs --tail=200 "$TARGET" || true
               exit 1
             fi
