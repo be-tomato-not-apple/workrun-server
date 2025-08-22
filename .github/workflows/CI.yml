@@ -25,7 +25,6 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      # Gradle wrapper가 캐시/데몬/설정 캐시 알아서 관리
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -34,31 +33,30 @@ jobs:
           chmod +x ./gradlew
           ./gradlew bootJar -x test --build-cache
 
-      # JAR 존재 여부를 아예 검증 (실패 원인 조기 차단)
       - name: Assert JAR exists
         run: |
-          echo "Listing build/libs:"
           ls -l build/libs || true
           JAR=$(ls -1 build/libs/*.jar | head -n1)
           [ -f "$JAR" ] || (echo "❌ JAR not found in build/libs"; exit 1)
           echo "✅ Found JAR: $JAR"
 
       - name: Login to DockerHub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 기존 docker build/push 두 스텝 → buildx 한 스텝으로 (레이어 캐시+이중 태그)
       - name: Set up Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
       - name: Build & Push image (cached, latest + sha tag)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          # --platform 제거(기본 x86_64). 불필요한 QEMU 경로 방지
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:${{ github.sha }}
@@ -74,16 +72,20 @@ jobs:
 
   deploy:
     needs: build
+    # 🔒 PR에서는 배포 금지. main에 push일 때만 실행
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # 1) 현재 업스트림 감지(원래 방식 유지: 러너에서 native ssh)
+      # 1) 현재 업스트림 감지(러너에서 native ssh) — 타임아웃 옵션 추가
       - name: Detect current upstream (native ssh)
         shell: bash
         run: |
           set -euo pipefail
           echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
           chmod 600 id_rsa
-          UP=$(ssh -o StrictHostKeyChecking=no -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
+          # ❗ fail-fast: connect/keepalive 옵션
+          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+          UP=$(ssh $SSH_OPTS -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
             'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                echo green
              else
@@ -113,20 +115,16 @@ jobs:
             set -Eeuo pipefail
             trap 'echo "[ERR] line:$LINENO code:$?"' ERR
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-            # 최신 sha 태그가 latest와 같이 올라가 있으므로 latest만 pull해도 OK
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
-            # secret 주입 (base64 → 파일)
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-            sudo ls -l /home/ubuntu/secrets || true
 
             cd /home/ubuntu
             echo "Compose: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
             ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
 
-            # compose 실행 시 DOCKERHUB_USERNAME 환경변수 보존
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             if command -v docker-compose >/dev/null 2>&1; then
               sudo -E docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
@@ -137,7 +135,7 @@ jobs:
             sleep 2
             sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
-      # 3) 헬스체크(재시도/타임아웃 강화 + /hc & /actuator/health 동시 지원)
+      # 3) 헬스체크(재시도/타임아웃 강화)
       - name: Health check new target (retry & rich diagnostics)
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -191,8 +189,6 @@ jobs:
             set -Eeuo pipefail
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
               sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload'
-              # Nginx 경유로 헬스도 한 번 확인(있으면)
-              sudo docker exec -i nginxserver bash -lc '(curl -fsS --max-time 3 http://127.0.0.1/actuator/health || curl -fsS --max-time 3 http://127.0.0.1/hc || true)'
             else
               echo "nginxserver not running. skip reload."
             fi
