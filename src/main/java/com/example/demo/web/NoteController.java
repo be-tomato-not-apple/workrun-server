@@ -1,4 +1,4 @@
-package com.example.demo.controller;
+package com.example.demo.web;
 
 import com.example.demo.domain.Note;
 import com.example.demo.repository.NoteRepository;
@@ -11,6 +11,7 @@ import java.util.List;
 @RequestMapping("/notes")
 public class NoteController {
     private final NoteRepository repo;
+
     public NoteController(NoteRepository repo) {
         this.repo = repo;
     }

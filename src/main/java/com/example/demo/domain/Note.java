@@ -10,13 +10,14 @@ public class Note {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable=false, length=200)
+    @Column(nullable = false, length = 200)
     private String message;
 
-    @Column(nullable=false)
+    @Column(nullable = false)
     private LocalDateTime createdAt;
 
-    protected Note() { } // JPA 기본 생성자
+    protected Note() {
+    } // JPA 기본 생성자
 
     public Note(String message) {
         this.message = message;
@@ -24,7 +25,15 @@ public class Note {
     }
 
     // Getter (필요시 Setter)
-    public Long getId() { return id; }
-    public String getMessage() { return message; }
-    public LocalDateTime getCreatedAt() { return createdAt; }
+    public Long getId() {
+        return id;
+    }
+
+    public String getMessage() {
+        return message;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
 }
