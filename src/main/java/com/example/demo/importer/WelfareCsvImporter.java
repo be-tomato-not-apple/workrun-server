@@ -176,6 +176,9 @@ public class WelfareCsvImporter implements CommandLineRunner {
 			loadWelfareFromCsv();
 			loadWelfareHomeStatusMapping();
 			loadWelfareInterestTopicMapping();
+			loadPrivateWelfareFromCsv();
+			loadPrivateHomeStatusMapping();
+			loadPrivateInterestTopicMapping();
 		}
 
 	}
@@ -236,6 +239,62 @@ public class WelfareCsvImporter implements CommandLineRunner {
 	private void loadWelfareInterestTopicMapping() throws Exception {
 		try (CSVReader reader = new CSVReader(
 			new InputStreamReader(getClass().getResourceAsStream("/central_welfare_topic.csv"), StandardCharsets.UTF_8))) {
+
+			reader.readNext(); // skip header
+			String[] tokens;
+			while ((tokens = reader.readNext()) != null) {
+				WelfareInterestTopic wt = new WelfareInterestTopic();
+				Welfare w = welfareRepository.findById(Long.parseLong(tokens[0])).get();
+				InterestTopic i = interestTopicRepository.findById(Integer.parseInt(tokens[1])).get();
+				wt.setInterestTopic(i);
+				wt.setWelfare(w);
+				welfareInterestTopicRepository.save(wt);
+			}
+		}
+	}
+
+	private void loadPrivateWelfareFromCsv() throws Exception {
+		try (CSVReader reader = new CSVReader(
+			new InputStreamReader(getClass().getResourceAsStream("/private_welfare.csv"), StandardCharsets.UTF_8))) {
+
+			String[] tokens;
+			reader.readNext(); // skip header
+
+			while ((tokens = reader.readNext()) != null) {
+				Welfare w = new Welfare();
+				w.setCenter(tokens[1]);
+				w.setServiceName(tokens[2]);
+				w.setContent(tokens[3]);
+				w.setUrl(tokens[4]);
+				w.setTarget(tokens[5].isEmpty() ? null : tokens[5]);
+				w.setApplyMethod(tokens[6].isEmpty() ? null : tokens[6]);
+				w.setNeedDocument(tokens[7].isEmpty() ? null : tokens[7]);
+
+				welfareRepository.save(w);
+			}
+		}
+	}
+
+	private void loadPrivateHomeStatusMapping() throws Exception {
+		try (CSVReader reader = new CSVReader(
+			new InputStreamReader(getClass().getResourceAsStream("/private_welfare_home.csv"), StandardCharsets.UTF_8))) {
+
+			reader.readNext(); // skip header
+			String[] tokens;
+			while ((tokens = reader.readNext()) != null) {
+				WelfareHomeStatus wh = new WelfareHomeStatus();
+				Welfare w = welfareRepository.findById(Long.parseLong(tokens[0])).get();
+				HomeStatus h = homeStatusRepository.findById(Integer.parseInt(tokens[1])).get();
+				wh.setWelfare(w);
+				wh.setHomeStatus(h);
+				welfareHomeStatusRepository.save(wh);
+			}
+		}
+	}
+
+	private void loadPrivateInterestTopicMapping() throws Exception {
+		try (CSVReader reader = new CSVReader(
+			new InputStreamReader(getClass().getResourceAsStream("/private_welfare_topic.csv"), StandardCharsets.UTF_8))) {
 
 			reader.readNext(); // skip header
 			String[] tokens;
