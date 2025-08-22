@@ -10,17 +10,13 @@ on:
 permissions:
   contents: read
 
-env:
-  # jar-only: 이미 떠있는 컨테이너에 JAR만 교체 (기본값)
-  # image    : 기존처럼 이미지를 빌드/푸시 후 compose 재기동
-  DEPLOY_MODE: jar
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      jar_name: ${{ steps.jarname.outputs.jar }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 1 }
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
@@ -29,76 +25,85 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build with Gradle (skip tests, cache)
+      - name: Build with Gradle (skip tests)
         run: |
           chmod +x ./gradlew
-          ./gradlew bootJar -x test --build-cache
+          ./gradlew bootJar -x test
 
+      # (A) JAR 존재 검증 + 파일명 추출
       - name: Assert JAR exists
+        id: jarname
         run: |
           ls -l build/libs || true
-          JAR=$(ls -1 build/libs/*.jar | head -n1) || true
-          [ -f "$JAR" ] || (echo "❌ JAR not found in build/libs"; exit 1)
-          echo "JAR_PATH=$JAR" >> $GITHUB_ENV
-          echo "✅ $JAR"
+          JAR=$(ls -1 build/libs/*.jar | head -n1)
+          [ -f "$JAR" ] || (echo "JAR not found"; exit 1)
+          echo "jar=$JAR" >> "$GITHUB_OUTPUT"
 
-      # === 이미지 빌드/푸시는 main push & DEPLOY_MODE=image 일 때만 ===
+      # (B) Docker 배포를 계속 쓸 거면 유지
       - name: Login to DockerHub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.DEPLOY_MODE == 'image'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Set up Buildx
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.DEPLOY_MODE == 'image'
-        uses: docker/setup-buildx-action@v3
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg JAR_FILE=build/libs/*.jar \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest .
 
-      - name: Build & Push image (latest + sha)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.DEPLOY_MODE == 'image'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:${{ github.sha }}
-          build-args: |
-            JAR_FILE=${{ env.JAR_PATH }}
-            VCS_REF=${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+      - name: Push Docker image
+        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
-      # === JAR 파일을 아티팩트로 올려두면 나중에 확인/복구 쉬움(선택) ===
+      # (C) JAR 전송을 쓸 수 있게 아티팩트 업로드 (deploy에서 받을 수 있게)
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-jar
-          path: ${{ env.JAR_PATH }}
+          name: built-jar
+          path: ${{ steps.jarname.outputs.jar }}
           retention-days: 3
 
   deploy:
     needs: build
-    # 🔒 PR에서는 배포 전부 스킵. main push에서만 실행
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # 0) 접속키 준비 + 업스트림 감지
+      # --- (옵션) JAR 전송을 쓸 경우: 아티팩트 다운로드 후 SCP로 복사 ---
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: built-jar
+          path: ./release
+
+      - name: Ensure remote releases dir
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            mkdir -p /home/ubuntu/releases
+
+      # ✅ 여기서 반드시 source 지정!
+      - name: Upload JAR via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "./release/*.jar"          # <= 없어서 실패했던 부분
+          target: "/home/ubuntu/releases/"
+          overwrite: true
+          timeout: 30s
+          command_timeout: 10m
+
+      # --- 원래 하던 Docker 방식 배포 (이미지 풀 + compose up) ---
       - name: Detect current upstream (native ssh)
         shell: bash
         run: |
           set -euo pipefail
           echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
           chmod 600 id_rsa
-          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=8 -o ConnectionAttempts=1 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o IPQoS=none"
-          UP=$(ssh $SSH_OPTS -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
+          UP=$(ssh -o StrictHostKeyChecking=no -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
             'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                echo green
              else
@@ -116,70 +121,15 @@ jobs:
             echo "TARGET_UPSTREAM=blue"  >> "$GITHUB_ENV"
           fi
 
-      # 1) (jar-only 모드) JAR만 교체: 비활성 업스트림 컨테이너에 복사 → 컨테이너만 빠르게 재시작
-      - name: Upload JAR to EC2 (scp)
-        if: env.DEPLOY_MODE == 'jar'
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: ${{ env.JAR_PATH }}
-          target: /home/ubuntu/releases/
-          overwrite: true
-
-      - name: Swap JAR on target container (jar-only)
-        if: env.DEPLOY_MODE == 'jar'
+      - name: Deploy target upstream (pull, secret write, compose up)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 10m
-          script: |
-            set -Eeuo pipefail
-            TARGET="${{ env.TARGET_UPSTREAM }}"
-            PORT="${{ env.STOPPED_PORT }}"
-            mkdir -p /home/ubuntu/releases
-            NEW_JAR=$(ls -1t /home/ubuntu/releases/*.jar | head -n1)
-            [ -f "$NEW_JAR" ] || { echo "No JAR found in /home/ubuntu/releases"; exit 1; }
-
-            # 대상 컨테이너 ID
-            CID=$(sudo docker ps -q -f name=^${TARGET}$) || true
-            if [ -z "$CID" ]; then
-              echo "Target container ${TARGET} not running. Abort."
-              exit 1
-            fi
-
-            echo "Copy $NEW_JAR -> container:$CID:/app/app.jar.new"
-            sudo docker cp "$NEW_JAR" "$CID":/app/app.jar.new
-
-            # 원자적 교체(+백업) 후 해당 컨테이너만 재시작 (활성 트래픽은 nginx가 반대편으로 라우팅 중)
-            sudo docker exec -i "$CID" sh -lc '
-              set -e
-              [ -f /app/app.jar.new ] || { echo "missing /app/app.jar.new"; exit 1; }
-              if [ -f /app/app.jar ]; then mv /app/app.jar /app/app.jar.bak; fi
-              mv /app/app.jar.new /app/app.jar
-              chown root:root /app/app.jar || true
-            '
-            echo "Restart container $TARGET"
-            sudo docker restart "$TARGET"
-
-            # 빠른 상태 출력
-            sleep 2
-            sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-      # 1') (image 모드) 기존 방식: pull + compose up
-      - name: Deploy target upstream (image mode)
-        if: env.DEPLOY_MODE == 'image'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
           host: ${{ secrets.WORKRUN_SERVER_IP }}
-          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           command_timeout: 20m
           script: |
-            set -Eeuo pipefail
+            set -euo pipefail
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
@@ -188,99 +138,63 @@ jobs:
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
 
             cd /home/ubuntu
+            echo "Compose: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
+            ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
+
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             if command -v docker-compose >/dev/null 2>&1; then
               sudo -E docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             else
-              sudo -E docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
+              sudo -E docker compose   -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             fi
 
-      # 2) Healthcheck (비활성 포트만 체크 → 트래픽 영향 없음)
-      - name: Healthcheck target
+            sleep 3
+            sudo docker ps -a
+
+      - name: Health check new target (run on EC2; public IP first)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
           username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 4m
+          command_timeout: 3m
           script: |
-            set -Eeuo pipefail
-            PORT="${{ env.STOPPED_PORT }}"
-            TARGET="${{ env.TARGET_UPSTREAM }}"
-            echo "Health target: $TARGET on $PORT"
-
-            ok=false
-            for i in $(seq 1 40); do
-              for u in "http://127.0.0.1:${PORT}/actuator/health" "http://127.0.0.1:${PORT}/hc"; do
-                echo "[$i] $u"
-                if curl -fsS --max-time 3 "$u" >/dev/null; then ok=true; break; fi
+            set -e
+            HC_OK=false
+            for i in $(seq 1 20); do
+              for u in "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/actuator/health" "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc" "http://127.0.0.1:${{ env.STOPPED_PORT }}/actuator/health" "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc"; do
+                echo "[$i] Trying $u ..."
+                if curl -fsS --max-time 3 "$u" >/dev/null; then echo "OK: $u"; HC_OK=true; break; fi
               done
-              [ "$ok" = true ] && break
-              [ $((i%10)) -eq 0 ] && { sudo docker logs --tail=50 "$TARGET" || true; }
+              [ "$HC_OK" = true ] && break
               sleep 3
             done
-            if [ "$ok" != true ]; then
-              echo "❌ healthcheck failed on ${PORT}"
+            if [ "$HC_OK" != true ]; then
+              echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
               sudo docker ps -a
-              sudo docker logs --tail=200 "$TARGET" || true
+              sudo docker logs --tail=200 ${{ env.TARGET_UPSTREAM }} || true
               exit 1
             fi
 
-      # 3) Nginx 업스트림 전환(실행 중일 때만)
       - name: Switch nginx upstream (if running)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
           username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-              sudo docker exec -i nginxserver bash -lc 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload'
-              # (선택) Nginx 경유로 헬스 확인
-              sudo docker exec -i nginxserver bash -lc '(curl -fsS --max-time 3 http://127.0.0.1/actuator/health || curl -fsS --max-time 3 http://127.0.0.1/hc || true)'
+              sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload'
             else
               echo "nginxserver not running. skip reload."
             fi
 
-      # 4) 이전 업스트림에 동일 JAR 적용(무중단 보장)
-      - name: Apply JAR to old upstream too (jar-only)
-        if: env.DEPLOY_MODE == 'jar'
+      - name: Stop old upstream (ignore if first deploy)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 10m
-          script: |
-            set -Eeuo pipefail
-            # 스위치 이후 현재 활성은 TARGET_UPSTREAM, 반대편이 OLD
-            if [ "${{ env.TARGET_UPSTREAM }}" = "blue" ]; then OLD=green; else OLD=blue; fi
-            NEW_JAR=$(ls -1t /home/ubuntu/releases/*.jar | head -n1)
-            [ -f "$NEW_JAR" ] || { echo "No JAR found"; exit 1; }
-            CID=$(sudo docker ps -q -f name=^${OLD}$) || true
-            if [ -z "$CID" ]; then echo "Old upstream not running. skip."; exit 0; fi
-
-            echo "Copy $NEW_JAR -> $OLD"
-            sudo docker cp "$NEW_JAR" "$CID":/app/app.jar.new
-            sudo docker exec -i "$CID" sh -lc '
-              set -e
-              [ -f /app/app.jar.new ] || { echo "missing /app/app.jar.new"; exit 1; }
-              if [ -f /app/app.jar ]; then mv /app/app.jar /app/app.jar.bak; fi
-              mv /app/app.jar.new /app/app.jar
-              chown root:root /app/app.jar || true
-            '
-            echo "Restart old container $OLD"
-            sudo docker restart "$OLD" || true
-
-      # 5) (image 모드) 예전 업스트림 정리
-      - name: Stop old upstream (image mode)
-        if: env.DEPLOY_MODE == 'image'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
           host: ${{ secrets.WORKRUN_SERVER_IP }}
-          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
             sudo docker rm -f ${{ env.CURRENT_UPSTREAM }} || true
