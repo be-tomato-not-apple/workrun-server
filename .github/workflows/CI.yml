@@ -105,27 +105,19 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # ---- 타이밍 트레이스 시작 ----
-      - name: __trace:start
-        run: |
-          echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
-          echo "STEP_TS=$(date +%s)"  >> "$GITHUB_ENV"
-
-      # 단일 SSH에서 감지 → 배포 → 헬스체크 → Nginx 전환 → 이전 중지까지 처리
-      - name: Deploy / Health / Switch (single SSH)
+      # --- 공통: 현재 업스트림/포트 계산 (원격에서 계산 후 출력) ---
+      - name: Detect upstream & export ports
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 20m
+          timeout: 30s
+          command_timeout: 60s
+          debug: true
           script: |
             set -Eeuo pipefail
-            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
-            exec {BASH_XTRACEFD}>&2
-            set -x
-
-            # 0) 현재 업스트림 감지 (nginxserver 없으면 green 가정)
+            exec {BASH_XTRACEFD}>&2; set -x
             detect_upstream() {
               if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                 echo green
@@ -134,80 +126,130 @@ jobs:
               fi
             }
             UP=$(detect_upstream)
-            echo "Detected upstream: $UP"
+            echo "CURRENT_UPSTREAM=$UP" | tee current.env
             if [ "$UP" = "blue" ]; then
-              CURRENT_UPSTREAM=blue; CURRENT_PORT=8080; STOPPED_PORT=8081; TARGET_UPSTREAM=green
+              echo "CURRENT_PORT=8080"   | tee -a current.env
+              echo "STOPPED_PORT=8081"  | tee -a current.env
+              echo "TARGET_UPSTREAM=green" | tee -a current.env
             else
-              CURRENT_UPSTREAM=green; CURRENT_PORT=8081; STOPPED_PORT=8080; TARGET_UPSTREAM=blue
+              echo "CURRENT_PORT=8081"   | tee -a current.env
+              echo "STOPPED_PORT=8080"   | tee -a current.env
+              echo "TARGET_UPSTREAM=blue" | tee -a current.env
             fi
-
-            # 1) 이미지 pull + 시크릿 주입 + compose up
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-            sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
-
+            cat current.env
+      - name: Fetch env from EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "current.env"
+          target: "./"
+      - name: Load env
+        run: |
+          set -e
+          cat current.env
+          export $(grep -E '^[A-Z_]+=.*' current.env | xargs -d '\n')
+          echo "CURRENT_UPSTREAM=$CURRENT_UPSTREAM" >> "$GITHUB_ENV"
+          echo "CURRENT_PORT=$CURRENT_PORT" >> "$GITHUB_ENV"
+          echo "STOPPED_PORT=$STOPPED_PORT" >> "$GITHUB_ENV"
+          echo "TARGET_UPSTREAM=$TARGET_UPSTREAM" >> "$GITHUB_ENV"
+  
+      # --- 1) Deploy target upstream ---
+      - name: 1) Deploy target (login/pull/secret/compose up)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 10m
+          debug: true
+          envs: TARGET_UPSTREAM,STOPPED_PORT
+          script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
+            T=15
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo timeout $T docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            sudo timeout 120 docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+  
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-
+  
             cd /home/ubuntu
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             COMPOSE_FILE="docker-compose-${TARGET_UPSTREAM}.yml"
-            echo "Compose: $COMPOSE_FILE"
             ls -l "$COMPOSE_FILE"
-
+  
             if command -v docker-compose >/dev/null 2>&1; then
-              sudo -E docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
+              sudo -E timeout 120 docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
             else
-              sudo -E docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+              sudo -E timeout 120 docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             fi
-
-            # 2) Healthcheck (빠르게, 실패 시 로그 즉시 덤프)
+  
+      # --- 2) Healthcheck only ---
+      - name: 2) Healthcheck (fail-fast with logs)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 2m
+          debug: true
+          envs: TARGET_UPSTREAM,STOPPED_PORT
+          script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
             URLS=("http://127.0.0.1:${STOPPED_PORT}/hc" "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc")
             ok=false
             for i in $(seq 1 10); do
               for u in "${URLS[@]}"; do
-                if curl -fsS --max-time 2 "$u" >/dev/null; then
-                  echo "OK: $u"; ok=true; break
-                fi
+                if curl -fsS --max-time 2 "$u" >/dev/null; then echo "OK: $u"; ok=true; break; fi
               done
               [ "$ok" = true ] && break
               echo "waiting app on ${STOPPED_PORT}... ($i/10)"; sleep 3
             done
             if [ "$ok" != true ]; then
               echo "healthcheck FAILED. dumping logs..."
-              sudo docker ps -a
+              sudo docker ps -a || true
               sudo docker logs --tail=200 "${TARGET_UPSTREAM}" || true
               exit 1
             fi
-
-            # 3) Nginx 업스트림 전환(실행 중일 때만)
+  
+      # --- 3) Nginx switch only ---
+      - name: 3) Nginx switch (if running)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 60s
+          debug: true
+          envs: TARGET_UPSTREAM
+          script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
               sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload"
             else
               echo "nginxserver not running. skip reload."
             fi
-
-            # 4) 이전 업스트림 종료(첫 배포면 없어도 통과)
+  
+      # --- 4) Cleanup old upstream (ignore errors) ---
+      - name: 4) Stop old upstream
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 60s
+          debug: true
+          envs: CURRENT_UPSTREAM
+          script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
             sudo docker rm -f "${CURRENT_UPSTREAM}" || true
-      - name: __trace:mark deploy-ssh
-        run: |
-          NOW=$(date +%s); echo "$NOW $STEP_TS deploy-ssh" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
-
-      # ---- 타이밍 요약 (Job 끝) ----
-      - name: __trace:summary
-        if: always()
-        run: |
-          {
-            echo "### Step Timings (deploy)"
-            echo ""
-            echo "| 구간 | 소요(s) |"
-            echo "|---|---:|"
-            START=${START_TS:-$(date +%s)}
-            PREV=$START
-            while read -r NOW LAST DESC; do
-              echo "| $DESC | $((NOW-PREV)) |"
-              PREV=$NOW
-            done < timings.txt
-            echo ""
-            echo "> 총합: $((PREV-START))s"
-          } >> "$GITHUB_STEP_SUMMARY" || true
