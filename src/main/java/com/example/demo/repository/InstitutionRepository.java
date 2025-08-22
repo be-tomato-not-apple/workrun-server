@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface InstitutionRepository extends JpaRepository<Institution, Long> {
 
@@ -19,4 +20,14 @@ public interface InstitutionRepository extends JpaRepository<Institution, Long> 
               WHERE (:code IS NULL OR t.code = :code)
             """)
     List<InstitutionDto> findAllSimple(@Param("code") String code);
+
+    @Query("""
+              SELECT new com.example.demo.web.dto.InstitutionDto(
+                i.id, i.name, t.displayName, i.address, i.homepageUrl
+              )
+              FROM Institution i
+              JOIN i.institutionType t
+              WHERE i.id = :id
+            """)
+    Optional<InstitutionDto> findSimpleById(@Param("id") Long id);
 }
