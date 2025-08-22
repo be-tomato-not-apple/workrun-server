@@ -1,57 +1,33 @@
 package com.example.demo.web;
 
-import com.example.demo.service.InstitutionService;
+import com.example.demo.service.InstitutionQueryService;
 import com.example.demo.web.dto.InstitutionDto;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
- * 기관 정보 API
- * 기관 목록 검색, 상세 조회
+ * 기관 관련 API 컨트롤러
+ * 기관 목록을 조회하는 엔드포인트를 제공
  */
 @RestController
 @RequestMapping("/api/institutions")
 @RequiredArgsConstructor
 public class InstitutionController {
 
-    private final InstitutionService service;
+    private final InstitutionQueryService service;
 
-    // 목록 검색: q, institutionCode, 정렬/페이지
+    /**
+     * 파라미터가 없거나 "", "0"이면 전체 반환
+     * 값이 있으면 해당 institution_code로 필터
+     */
     @GetMapping
-    public Page<InstitutionDto> search(
-            @RequestParam(required = false) String q,
-            @RequestParam(required = false) String institutionCode,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size,
-            @RequestParam(defaultValue = "name,asc") String sort
-    ) {
-        Sort sortSpec = parseSort(sort); // name,asc | updatedAt,desc ...
-        Pageable pageable = PageRequest.of(page, size, sortSpec);
-        return service.search(q, institutionCode, pageable);
-    }
-
-    // 상세
-    @GetMapping("/{id}")
-    public InstitutionDto get(@PathVariable Long id) {
-        return service.get(id);
-    }
-
-    private Sort parseSort(String sort) {
-        // "name,asc" or "updatedAt,desc"
-        String[] p = sort.split(",", 2);
-        String prop = p[0];
-        Sort.Direction dir = (p.length > 1 && "desc".equalsIgnoreCase(p[1])) ? Sort.Direction.DESC : Sort.Direction.ASC;
-
-        // 엔티티 필드명 매핑
-        return switch (prop) {
-            case "name" -> Sort.by(dir, "name", "id");
-            case "createdAt" -> Sort.by(dir, "createdAt", "id");
-            case "updatedAt" -> Sort.by(dir, "updatedAt", "id");
-            default -> Sort.by(Sort.Direction.ASC, "name", "id");
-        };
+    public List<InstitutionDto> list(
+            @RequestParam(name = "institutionCode", required = false) String institutionCode) {
+        return service.list(institutionCode);
     }
 }
