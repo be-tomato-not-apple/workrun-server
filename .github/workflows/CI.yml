@@ -74,14 +74,22 @@ jobs:
           name: built-jar
           path: ./release
 
-      - name: Ensure remote releases dir
+      - name: Ensure remote releases dir (with debug)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s              # SSH connect timeout
+          command_timeout: 60s      # remote command timeout
+          debug: true               # -vvv 로그 출력
           script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
+            # smoke: whoami/hostname/date 먼저 찍어서 "정말 들어왔는지" 확인
+            whoami; hostname; date
             mkdir -p /home/ubuntu/releases
+            ls -ld /home/ubuntu/releases
 
       # ✅ 여기서 반드시 source 지정!
       - name: Upload JAR via SCP
