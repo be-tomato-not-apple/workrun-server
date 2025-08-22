@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
@@ -23,10 +25,23 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Build with Gradle (skip tests)
+      # Gradle wrapper가 캐시/데몬/설정 캐시 알아서 관리
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build with Gradle (skip tests, no clean, use caches)
         run: |
           chmod +x ./gradlew
-          ./gradlew clean bootJar -x test
+          ./gradlew bootJar -x test --build-cache
+
+      # JAR 존재 여부를 아예 검증 (실패 원인 조기 차단)
+      - name: Assert JAR exists
+        run: |
+          echo "Listing build/libs:"
+          ls -l build/libs || true
+          JAR=$(ls -1 build/libs/*.jar | head -n1)
+          [ -f "$JAR" ] || (echo "❌ JAR not found in build/libs"; exit 1)
+          echo "✅ Found JAR: $JAR"
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -34,21 +49,34 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --build-arg JAR_FILE=build/libs/*.jar \
-            --platform linux/amd64 \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest .
+      # 기존 docker build/push 두 스텝 → buildx 한 스텝으로 (레이어 캐시+이중 태그)
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Push Docker image
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+      - name: Build & Push image (cached, latest + sha tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # --platform 제거(기본 x86_64). 불필요한 QEMU 경로 방지
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:${{ github.sha }}
+          build-args: |
+            JAR_FILE=build/libs/*.jar
+            VCS_REF=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # 1) 현재 업스트림 감지(러너에서 ssh, nginx 없거나 꺼져있으면 green 가정)
+      # 1) 현재 업스트림 감지(원래 방식 유지: 러너에서 native ssh)
       - name: Detect current upstream (native ssh)
         shell: bash
         run: |
@@ -82,8 +110,10 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           command_timeout: 20m
           script: |
-            set -euo pipefail
+            set -Eeuo pipefail
+            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            # 최신 sha 태그가 latest와 같이 올라가 있으므로 latest만 pull해도 OK
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
             # secret 주입 (base64 → 파일)
@@ -104,31 +134,51 @@ jobs:
               sudo -E docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
             fi
 
-            sleep 3
-            sudo docker ps -a
+            sleep 2
+            sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
-      # 3) 헬스체크(퍼블릭 IP → 실패 시 로컬로 폴백)
-      - name: Health check new target (run on EC2; public IP first)
+      # 3) 헬스체크(재시도/타임아웃 강화 + /hc & /actuator/health 동시 지원)
+      - name: Health check new target (retry & rich diagnostics)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 5m
           script: |
-            set -e
-            for i in {1..5}; do  # 최대 3분 대기
-              if curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc" >/dev/null \
-                 || curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc" >/dev/null; then
-                echo "new app is UP on ${{ env.STOPPED_PORT }}"
-                exit 0
+            set -Eeuo pipefail
+            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
+
+            PORT=${{ env.STOPPED_PORT }}
+            TARGET=${{ env.TARGET_UPSTREAM }}
+            echo "Health target: $TARGET on $PORT"
+
+            HC_OK=false
+            for i in $(seq 1 40); do
+              for u in "http://127.0.0.1:${PORT}/hc" "http://127.0.0.1:${PORT}/actuator/health"; do
+                echo "[$i] Trying $u ..."
+                if curl -fsS --max-time 3 "$u" >/dev/null; then
+                  echo "✅ $u OK"
+                  HC_OK=true
+                  break
+                fi
+              done
+              [ "$HC_OK" = true ] && break
+              if [ $((i % 10)) -eq 0 ]; then
+                echo "[diag] docker ps snapshot:"
+                sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+                echo "[diag] last 50 logs of $TARGET:"
+                sudo docker logs --tail=50 "$TARGET" || true
               fi
-              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/36)"
-              sleep 5
+              sleep 3
             done
-            echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
-            sudo docker ps -a
-            sudo docker logs --tail=200 ${{ env.TARGET_UPSTREAM }} || true
-            exit 1
+
+            if [ "$HC_OK" != true ]; then
+              echo "❌ healthcheck failed on ${PORT}. final diagnostics..."
+              sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+              sudo docker logs --tail=200 "${TARGET}" || true
+              exit 1
+            fi
 
       # 4) Nginx 업스트림 전환(nginxserver 실행 중일 때만)
       - name: Switch nginx upstream (if running)
@@ -138,9 +188,11 @@ jobs:
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
+            set -Eeuo pipefail
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-              sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -s reload'
+              sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload'
+              # Nginx 경유로 헬스도 한 번 확인(있으면)
+              sudo docker exec -i nginxserver bash -lc '(curl -fsS --max-time 3 http://127.0.0.1/actuator/health || curl -fsS --max-time 3 http://127.0.0.1/hc || true)'
             else
               echo "nginxserver not running. skip reload."
             fi

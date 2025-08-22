@@ -23,7 +23,7 @@ server:
   env: local
   port: 8080
   serverAddress: 127.0.0.1
-
+  address: 0.0.0.0
 serverName: local_server
 
 
@@ -37,7 +37,7 @@ spring:
 server:
   env: blue
   port: 8080
-  serverAddress: 54.180.219.136
+  address: 0.0.0.0
 serverName: blue_server
 
 # ---- green (EC2) ---------------------------------------------
@@ -50,7 +50,7 @@ spring:
 server:
   env: green
   port: 8080
-  serverAddress: 54.180.219.136
+  address: 0.0.0.0
 serverName: green_server
 
 # ---- common ---------------------------------------------------
