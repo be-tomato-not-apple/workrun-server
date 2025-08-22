@@ -1,7 +1,6 @@
 package com.example.demo.repository;
 
 import com.example.demo.domain.Welfare;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -24,13 +23,8 @@ public interface WelfareRepository extends JpaRepository<Welfare, Long> {
             "LEFT JOIN FETCH w.homeStatusList whs " +
             "LEFT JOIN FETCH whs.homeStatus " +
             "LEFT JOIN FETCH w.interestList wit " +
-            "LEFT JOIN FETCH wit.interestTopic")
-    Page<Welfare> findAllWithDetails(Pageable pageable);
-
-    @Query("SELECT DISTINCT w FROM Welfare w " +
-            "LEFT JOIN FETCH w.homeStatusList whs " +
-            "LEFT JOIN FETCH whs.homeStatus " +
-            "LEFT JOIN FETCH w.interestList wit " +
-            "LEFT JOIN FETCH wit.interestTopic")
-    List<Welfare> findAllWithDetails();
+            "LEFT JOIN FETCH wit.interestTopic " +
+            "WHERE (:cursor IS NULL OR w.id < :cursor) " +
+            "ORDER BY w.id DESC")
+    List<Welfare> findWithCursor(@Param("cursor") Long cursor, Pageable pageable);
 }
