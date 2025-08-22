@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
 
+# 같은 브랜치에 연속 푸시되면 이전 작업 취소 → 대기시간 줄이기
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,9 +19,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # ---- 타이밍 트레이스 시작 ----
+      - name: __trace:start
+        run: |
+          echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+          echo "STEP_TS=$(date +%s)"  >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: __trace:mark checkout
+        run: |
+          NOW=$(date +%s); echo "$NOW $STEP_TS checkout" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -28,17 +38,21 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
-
-      # Gradle 전용 액션: 캐시/데몬/설정 캐시 자동 처리
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+      - name: __trace:mark java+gradle
+        run: |
+          NOW=$(date +%s); echo "$NOW $STEP_TS java+gradle" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
 
-      - name: Build jar (skip tests, no clean, use caches)
+      - name: Build jar (skip tests, use caches)
         run: |
           chmod +x ./gradlew
           ./gradlew bootJar -x test --build-cache
+      - name: __trace:mark gradle-build
+        run: |
+          NOW=$(date +%s); echo "$NOW $STEP_TS gradle-build" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
 
-      # ---------- Docker: PR에서는 스킵, main push에서만 빌드/푸시 ----------
+      # ---------- Docker: main push에서만 빌드/푸시 ----------
       - name: Set up Buildx
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
@@ -56,20 +70,49 @@ jobs:
         with:
           context: .
           push: true
-          # platform은 기본(x86_64) 사용. 불필요한 --platform 제거
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
           build-args: |
             JAR_FILE=build/libs/*.jar
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false  # 로그/메타 축소(선택)
+          provenance: false
+      - name: __trace:mark docker-build-push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          NOW=$(date +%s); echo "$NOW $STEP_TS docker-build-push" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
+
+      # ---- 타이밍 요약 (Job 끝) ----
+      - name: __trace:summary
+        if: always()
+        run: |
+          {
+            echo "### Step Timings"
+            echo ""
+            echo "| 구간 | 소요(s) |"
+            echo "|---|---:|"
+            START=${START_TS:-$(date +%s)}
+            PREV=$START
+            while read -r NOW LAST DESC; do
+              echo "| $DESC | $((NOW-PREV)) |"
+              PREV=$NOW
+            done < timings.txt
+            echo ""
+            echo "> 총합: $((PREV-START))s"
+          } >> "$GITHUB_STEP_SUMMARY" || true
 
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy/Health/Switch via single SSH
+      # ---- 타이밍 트레이스 시작 ----
+      - name: __trace:start
+        run: |
+          echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+          echo "STEP_TS=$(date +%s)"  >> "$GITHUB_ENV"
+
+      # 단일 SSH에서 감지 → 배포 → 헬스체크 → Nginx 전환 → 이전 중지까지 처리
+      - name: Deploy / Health / Switch (single SSH)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -77,9 +120,12 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           command_timeout: 20m
           script: |
-            set -euo pipefail
+            set -Eeuo pipefail
+            trap 'echo "[ERR] line:$LINENO code:$?"' ERR
+            exec {BASH_XTRACEFD}>&2
+            set -x
 
-            # 0) 현재 업스트림 감지 (ssh 옵션으로 타임아웃/keepalive)
+            # 0) 현재 업스트림 감지 (nginxserver 없으면 green 가정)
             detect_upstream() {
               if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                 echo green
@@ -115,23 +161,53 @@ jobs:
               sudo -E docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             fi
 
-            # 2) 헬스체크 (빠르게, 총 ~30s)
+            # 2) Healthcheck (빠르게, 실패 시 로그 즉시 덤프)
+            URLS=("http://127.0.0.1:${STOPPED_PORT}/hc" "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc")
+            ok=false
             for i in $(seq 1 10); do
-              if curl -sf "http://127.0.0.1:${STOPPED_PORT}/hc" >/dev/null \
-                 || curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc" >/dev/null; then
-                echo "NEW app is UP on ${STOPPED_PORT}"
-                break
-              fi
-              echo "waiting app on ${STOPPED_PORT} ... ($i/10)"
-              sleep 3
+              for u in "${URLS[@]}"; do
+                if curl -fsS --max-time 2 "$u" >/dev/null; then
+                  echo "OK: $u"; ok=true; break
+                fi
+              done
+              [ "$ok" = true ] && break
+              echo "waiting app on ${STOPPED_PORT}... ($i/10)"; sleep 3
             done
+            if [ "$ok" != true ]; then
+              echo "healthcheck FAILED. dumping logs..."
+              sudo docker ps -a
+              sudo docker logs --tail=200 "${TARGET_UPSTREAM}" || true
+              exit 1
+            fi
 
-            # 3) Nginx 업스트림 전환(있을 때만)
+            # 3) Nginx 업스트림 전환(실행 중일 때만)
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-              sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -s reload"
+              sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload"
             else
               echo "nginxserver not running. skip reload."
             fi
 
-            # 4) 이전 업스트림 종료(첫 배포면 skip)
+            # 4) 이전 업스트림 종료(첫 배포면 없어도 통과)
             sudo docker rm -f "${CURRENT_UPSTREAM}" || true
+      - name: __trace:mark deploy-ssh
+        run: |
+          NOW=$(date +%s); echo "$NOW $STEP_TS deploy-ssh" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
+
+      # ---- 타이밍 요약 (Job 끝) ----
+      - name: __trace:summary
+        if: always()
+        run: |
+          {
+            echo "### Step Timings (deploy)"
+            echo ""
+            echo "| 구간 | 소요(s) |"
+            echo "|---|---:|"
+            START=${START_TS:-$(date +%s)}
+            PREV=$START
+            while read -r NOW LAST DESC; do
+              echo "| $DESC | $((NOW-PREV)) |"
+              PREV=$NOW
+            done < timings.txt
+            echo ""
+            echo "> 총합: $((PREV-START))s"
+          } >> "$GITHUB_STEP_SUMMARY" || true
