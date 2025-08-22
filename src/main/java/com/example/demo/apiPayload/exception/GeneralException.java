@@ -1,6 +1,6 @@
 package com.example.demo.apiPayload.exception;
 
-import com.example.demo.apiPayload.code.ErrorCode;
+import com.example.demo.apiPayload.code.error.ErrorCode;
 
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;

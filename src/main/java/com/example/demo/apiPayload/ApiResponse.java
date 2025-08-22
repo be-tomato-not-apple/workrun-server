@@ -1,8 +1,8 @@
 package com.example.demo.apiPayload;
 
 
-import com.example.demo.apiPayload.code.CommonSuccessCode;
-import com.example.demo.apiPayload.code.ErrorCode;
+import com.example.demo.apiPayload.code.success.CommonSuccessCode;
+import com.example.demo.apiPayload.code.error.ErrorCode;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 
 

@@ -5,15 +5,12 @@ import java.util.Objects;
 
 import org.springframework.stereotype.Service;
 
-import com.example.demo.apiPayload.code.CommonErrorCode;
+import com.example.demo.apiPayload.code.error.CommonErrorCode;
 import com.example.demo.apiPayload.exception.GeneralException;
-import com.example.demo.domain.HomeStatus;
 import com.example.demo.domain.Welfare;
 import com.example.demo.domain.mapping.WelfareHomeStatus;
 import com.example.demo.domain.mapping.WelfareInterestTopic;
 import com.example.demo.dto.welfareDetailDTO;
-import com.example.demo.repository.HomeStatusRepository;
-import com.example.demo.repository.InterestTopicRepository;
 import com.example.demo.repository.WelfareHomeStatusRepository;
 import com.example.demo.repository.WelfareInterestTopicRepository;
 import com.example.demo.repository.WelfareRepository;

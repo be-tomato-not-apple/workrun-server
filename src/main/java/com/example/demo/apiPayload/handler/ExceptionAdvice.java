@@ -16,9 +16,9 @@ import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import com.example.demo.apiPayload.ApiResponse;
-import com.example.demo.apiPayload.code.CommonErrorCode;
-import com.example.demo.apiPayload.code.EmailErrorCode;
-import com.example.demo.apiPayload.code.ErrorCode;
+import com.example.demo.apiPayload.code.error.CommonErrorCode;
+import com.example.demo.apiPayload.code.error.EmailErrorCode;
+import com.example.demo.apiPayload.code.error.ErrorCode;
 import com.example.demo.apiPayload.exception.GeneralException;
 import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 

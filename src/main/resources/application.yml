@@ -13,11 +13,19 @@ spring:
     activate:
       on-profile: local
 
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/tomato
+    username: root
+    password: ${DB_PASSWORD}  # 환경변수로 설정
+
 server:
   env: local
   port: 8080
   serverAddress: 127.0.0.1
+
 serverName: local_server
+
 
 # ---- blue (EC2) ----------------------------------------------
 ---
@@ -52,19 +60,6 @@ spring:
     activate:
       on-profile: common
 
-  springdoc:
-    swagger-ui:
-      enable: true
-      enabled: true
-    api-docs:
-      enabled: true
-
-  batch:
-    jdbc:
-      initialize-schema: never
-    job:
-      enabled: false
-
   jpa:
     hibernate:
       ddl-auto: update
@@ -75,7 +70,19 @@ spring:
         show_sql: true
         highlight_sql: true
 
+  batch:
+    jdbc:
+      initialize-schema: never
+    job:
+      enabled: false
+
 logging:
   level:
     org.springframework.web: DEBUG
-    org.springframework.web.client.DefaultRestClient: OFF
+
+springdoc:
+  swagger-ui:
+    enable: true
+    enabled: true
+  api-docs:
+    enabled: true
