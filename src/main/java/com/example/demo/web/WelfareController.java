@@ -22,7 +22,7 @@ import java.util.List;
 @Tag(name = "복지정책 API", description = "복지정책 관련 API")
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/welfares")
+@RequestMapping("/api/welfares")
 @Slf4j
 public class WelfareController {
 
