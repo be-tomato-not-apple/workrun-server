@@ -9,14 +9,13 @@ import com.example.demo.dto.welfareDetailDTO;
 import com.example.demo.repository.WelfareHomeStatusRepository;
 import com.example.demo.repository.WelfareInterestTopicRepository;
 import com.example.demo.repository.WelfareRepository;
+import com.example.demo.web.dto.CursorPageResponse;
 import com.example.demo.web.dto.WelfareSummaryDTO;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -54,7 +53,7 @@ public class WelfareServiceImpl implements WelfareService {
                 .toList();
 
         return new welfareDetailDTO().builder()
-                .id(welfare.getId())  // ID 추가
+                .id(welfare.getId())
                 .center(welfare.getCenter())
                 .serviceName(welfare.getServiceName())
                 .content(welfare.getContent())
@@ -68,24 +67,29 @@ public class WelfareServiceImpl implements WelfareService {
     }
 
     @Override
-    public Page<WelfareSummaryDTO> getAllWelfares(int page, int size) {
-        log.info("복지정책 전체 목록 조회 (페이징) - page: {}, size: {}", page, size);
+    public CursorPageResponse<WelfareSummaryDTO> getWelfares(Long cursor, int size) {
+        log.info("복지정책 목록 조회 (Cursor 방식) - cursor: {}, size: {}", cursor, size);
 
-        Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
-        Page<Welfare> welfarePage = welfareRepository.findAllWithDetails(pageable);
+        // size + 1로 조회해서 다음 페이지 존재 여부 확인
+        Pageable pageable = PageRequest.of(0, size + 1);
+        List<Welfare> welfares = welfareRepository.findWithCursor(cursor, pageable);
 
-        return welfarePage.map(this::convertToSummaryDTO);
-    }
+        // 다음 페이지 존재 여부 확인
+        boolean hasNext = welfares.size() > size;
+        if (hasNext) {
+            welfares.remove(welfares.size() - 1); // 마지막 요소 제거
+        }
 
-    @Override
-    public List<WelfareSummaryDTO> getAllWelfares() {
-        log.info("복지정책 전체 목록 조회 (전체)");
+        // 다음 커서 설정
+        Long nextCursor = hasNext && !welfares.isEmpty()
+                ? welfares.get(welfares.size() - 1).getId()
+                : null;
 
-        List<Welfare> welfares = welfareRepository.findAllWithDetails();
-
-        return welfares.stream()
+        List<WelfareSummaryDTO> content = welfares.stream()
                 .map(this::convertToSummaryDTO)
                 .collect(Collectors.toList());
+
+        return CursorPageResponse.of(content, nextCursor, hasNext);
     }
 
     private WelfareSummaryDTO convertToSummaryDTO(Welfare welfare) {
