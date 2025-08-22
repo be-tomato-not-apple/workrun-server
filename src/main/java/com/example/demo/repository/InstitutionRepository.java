@@ -1,32 +1,22 @@
 package com.example.demo.repository;
 
-
 import com.example.demo.domain.Institution;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
+import com.example.demo.web.dto.InstitutionDto;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
-@Repository
-public interface InstitutionRepository extends JpaRepository<Institution, Long>, JpaSpecificationExecutor<Institution> {
+import java.util.List;
 
-    // LIKE 검색 + 코드 필터
+public interface InstitutionRepository extends JpaRepository<Institution, Long> {
+
     @Query("""
-              SELECT i FROM Institution i
-                LEFT JOIN i.institutionType t
+              SELECT new com.example.demo.web.dto.InstitutionDto(
+                i.id, i.name, t.displayName, i.address, i.homepageUrl
+              )
+              FROM Institution i
+              JOIN i.institutionType t
               WHERE (:code IS NULL OR t.code = :code)
-                AND (
-                  :q IS NULL OR
-                  LOWER(i.name)    LIKE LOWER(CONCAT('%', :q, '%')) OR
-                  LOWER(i.address) LIKE LOWER(CONCAT('%', :q, '%'))
-                )
             """)
-    Page<Institution> search(
-            @Param("q") String q,
-            @Param("code") String code,
-            Pageable pageable
-    );
+    List<InstitutionDto> findAllSimple(@Param("code") String code);
 }
