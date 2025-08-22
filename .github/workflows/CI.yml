@@ -56,18 +56,12 @@ jobs:
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
       # (C) JAR 전송을 쓸 수 있게 아티팩트 업로드 (deploy에서 받을 수 있게)
-      - name: Upload JAR via SCP
-        uses: appleboy/scp-action@v0.1.7
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
         with:
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "./release/*.jar"     # 꼭 지정!
-          target: "/home/ubuntu/releases/"
-          overwrite: true
-          timeout: 30s
-          command_timeout: 10m
-          debug: true                   # 필요시 켬
+          name: built-jar
+          path: ${{ steps.jarname.outputs.jar }}
+          retention-days: 3
 
   deploy:
     needs: build
@@ -80,22 +74,14 @@ jobs:
           name: built-jar
           path: ./release
 
-      - name: Ensure remote releases dir (with debug)
+      - name: Ensure remote releases dir
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 30s              # SSH connect timeout
-          command_timeout: 60s      # remote command timeout
-          debug: true               # -vvv 로그 출력
           script: |
-            set -Eeuo pipefail
-            exec {BASH_XTRACEFD}>&2; set -x
-            # smoke: whoami/hostname/date 먼저 찍어서 "정말 들어왔는지" 확인
-            whoami; hostname; date
             mkdir -p /home/ubuntu/releases
-            ls -ld /home/ubuntu/releases
 
       # ✅ 여기서 반드시 source 지정!
       - name: Upload JAR via SCP
