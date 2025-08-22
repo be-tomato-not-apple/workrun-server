@@ -56,12 +56,18 @@ jobs:
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
       # (C) JAR 전송을 쓸 수 있게 아티팩트 업로드 (deploy에서 받을 수 있게)
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload JAR via SCP
+        uses: appleboy/scp-action@v0.1.7
         with:
-          name: built-jar
-          path: ${{ steps.jarname.outputs.jar }}
-          retention-days: 3
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "./release/*.jar"     # 꼭 지정!
+          target: "/home/ubuntu/releases/"
+          overwrite: true
+          timeout: 30s
+          command_timeout: 10m
+          debug: true                   # 필요시 켬
 
   deploy:
     needs: build
