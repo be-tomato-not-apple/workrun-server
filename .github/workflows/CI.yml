@@ -10,71 +10,66 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Install JDK 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
 
-      - name: Build with Gradle (skip tests)
+      # Gradle 전용 액션: 캐시/데몬/설정 캐시 자동 처리
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build jar (skip tests, no clean, use caches)
         run: |
           chmod +x ./gradlew
-          ./gradlew clean bootJar -x test
+          ./gradlew bootJar -x test --build-cache
+
+      # ---------- Docker: PR에서는 스킵, main push에서만 빌드/푸시 ----------
+      - name: Set up Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to DockerHub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --build-arg JAR_FILE=build/libs/*.jar \
-            --platform linux/amd64 \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest .
-
-      - name: Push Docker image
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+      - name: Build & Push image (cached)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # platform은 기본(x86_64) 사용. 불필요한 --platform 제거
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+          build-args: |
+            JAR_FILE=build/libs/*.jar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false  # 로그/메타 축소(선택)
 
   deploy:
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      # 1) 현재 업스트림 감지(러너에서 ssh, nginx 없거나 꺼져있으면 green 가정)
-      - name: Detect current upstream (native ssh)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "${{ secrets.EC2_SSH_KEY }}" > id_rsa
-          chmod 600 id_rsa
-          UP=$(ssh -o StrictHostKeyChecking=no -i id_rsa ubuntu@${{ secrets.WORKRUN_SERVER_IP }} \
-            'if [ -z "$(docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-               echo green
-             else
-               docker exec -i nginxserver bash -lc '\''grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'\''
-             fi')
-          echo "Detected upstream on EC2: $UP"
-          echo "CURRENT_UPSTREAM=$UP" >> "$GITHUB_ENV"
-          if [ "$UP" = "blue" ]; then
-            echo "CURRENT_PORT=8080"   >> "$GITHUB_ENV"
-            echo "STOPPED_PORT=8081"  >> "$GITHUB_ENV"
-            echo "TARGET_UPSTREAM=green" >> "$GITHUB_ENV"
-          else
-            echo "CURRENT_PORT=8081"  >> "$GITHUB_ENV"
-            echo "STOPPED_PORT=8080"  >> "$GITHUB_ENV"
-            echo "TARGET_UPSTREAM=blue"  >> "$GITHUB_ENV"
-          fi
-
-      # 2) 대상 업스트림 컨테이너 기동 (이미지 pull, secret 파일 주입, compose up)
-      - name: Deploy target upstream (pull, secret write, compose up)
+      - name: Deploy/Health/Switch via single SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -83,74 +78,60 @@ jobs:
           command_timeout: 20m
           script: |
             set -euo pipefail
+
+            # 0) 현재 업스트림 감지 (ssh 옵션으로 타임아웃/keepalive)
+            detect_upstream() {
+              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+                echo green
+              else
+                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
+              fi
+            }
+            UP=$(detect_upstream)
+            echo "Detected upstream: $UP"
+            if [ "$UP" = "blue" ]; then
+              CURRENT_UPSTREAM=blue; CURRENT_PORT=8080; STOPPED_PORT=8081; TARGET_UPSTREAM=green
+            else
+              CURRENT_UPSTREAM=green; CURRENT_PORT=8081; STOPPED_PORT=8080; TARGET_UPSTREAM=blue
+            fi
+
+            # 1) 이미지 pull + 시크릿 주입 + compose up
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
 
-            # secret 주입 (base64 → 파일)
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-            sudo ls -l /home/ubuntu/secrets || true
 
             cd /home/ubuntu
-            echo "Compose: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-            ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-
-            # compose 실행 시 DOCKERHUB_USERNAME 환경변수 보존
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
+            COMPOSE_FILE="docker-compose-${TARGET_UPSTREAM}.yml"
+            echo "Compose: $COMPOSE_FILE"
+            ls -l "$COMPOSE_FILE"
+
             if command -v docker-compose >/dev/null 2>&1; then
-              sudo -E docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
+              sudo -E docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
             else
-              sudo -E docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
+              sudo -E docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             fi
 
-            sleep 3
-            sudo docker ps -a
-
-      # 3) 헬스체크(퍼블릭 IP → 실패 시 로컬로 폴백)
-      - name: Health check new target (run on EC2; public IP first)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          username: ubuntu
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            for i in {1..5}; do
-              if curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${{ env.STOPPED_PORT }}/hc" >/dev/null \
-                 || curl -sf "http://127.0.0.1:${{ env.STOPPED_PORT }}/hc" >/dev/null; then
-                echo "new app is UP on ${{ env.STOPPED_PORT }}"
-                exit 0
+            # 2) 헬스체크 (빠르게, 총 ~30s)
+            for i in $(seq 1 10); do
+              if curl -sf "http://127.0.0.1:${STOPPED_PORT}/hc" >/dev/null \
+                 || curl -sf "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc" >/dev/null; then
+                echo "NEW app is UP on ${STOPPED_PORT}"
+                break
               fi
-              echo "waiting app on ${{ env.STOPPED_PORT }} ... ($i/36)"
-              sleep 5
+              echo "waiting app on ${STOPPED_PORT} ... ($i/10)"
+              sleep 3
             done
-            echo "healthcheck failed on ${{ env.STOPPED_PORT }}"
-            sudo docker ps -a
-            sudo docker logs --tail=200 ${{ env.TARGET_UPSTREAM }} || true
-            exit 1
 
-      # 4) Nginx 업스트림 전환(nginxserver 실행 중일 때만)
-      - name: Switch nginx upstream (if running)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          username: ubuntu
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
+            # 3) Nginx 업스트림 전환(있을 때만)
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-              sudo docker exec -i nginxserver bash -c 'echo "set \$service_url ${{ env.TARGET_UPSTREAM }};" > /etc/nginx/conf.d/service-env.inc && nginx -s reload'
+              sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -s reload"
             else
               echo "nginxserver not running. skip reload."
             fi
 
-      # 5) 이전 업스트림 종료(첫 배포면 없어도 통과)
-      - name: Stop old upstream (ignore if first deploy)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          username: ubuntu
-          host: ${{ secrets.WORKRUN_SERVER_IP }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            sudo docker rm -f ${{ env.CURRENT_UPSTREAM }} || true
+            # 4) 이전 업스트림 종료(첫 배포면 skip)
+            sudo docker rm -f "${CURRENT_UPSTREAM}" || true
