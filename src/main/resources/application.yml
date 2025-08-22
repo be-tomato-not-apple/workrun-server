@@ -16,7 +16,7 @@ spring:
 server:
   env: local
   port: 8080
-  serverAddress: 127.0.0.1
+  address: 0.0.0.0
 serverName: local_server
 
 # ---- blue (EC2) ----------------------------------------------
@@ -29,7 +29,7 @@ spring:
 server:
   env: blue
   port: 8080
-  serverAddress: 54.180.219.136
+  address: 0.0.0.0
 serverName: blue_server
 
 # ---- green (EC2) ---------------------------------------------
@@ -42,7 +42,7 @@ spring:
 server:
   env: green
   port: 8080
-  serverAddress: 54.180.219.136
+  address: 0.0.0.0
 serverName: green_server
 
 # ---- common ---------------------------------------------------
@@ -74,7 +74,7 @@ spring:
           time_zone: Asia/Seoul
         show_sql: true
         highlight_sql: true
-
+        
 logging:
   level:
     org.springframework.web: DEBUG
