@@ -104,29 +104,37 @@ jobs:
           command_timeout: 20m
           script: |
             set -euo pipefail
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-            sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
-
-            # secret 주입 (base64 → 파일)
-            sudo mkdir -p /home/ubuntu/secrets
-            echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
-            sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-            sudo ls -l /home/ubuntu/secrets || true
-
-            cd /home/ubuntu
-            echo "Compose: docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-            ls -l "docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
-
-            # compose 실행 시 DOCKERHUB_USERNAME 환경변수 보존
-            export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
+            set -x  # 디버그 출력
+      
+            # 0) sudo가 비번 없이 가능한지 확인 (아니면 즉시 실패)
+            sudo -n true
+      
+            # 1) Docker 로그인 & 최신 이미지 pull (timeout 방지)
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo -n docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            timeout 180 sudo -n docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+      
+            # 2) secret 파일 주입
+            sudo -n mkdir -p /home/ubuntu/secrets
+            echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo -n tee /home/ubuntu/secrets/application-secret.yml >/dev/null
+            sudo -n chmod 600 /home/ubuntu/secrets/application-secret.yml
+            sudo -n ls -l /home/ubuntu/secrets || true
+      
+            # 3) compose 존재여부/버전 출력
+            (docker-compose --version || true)
+            (docker compose version || true)
+      
+            # 4) compose up (v1/v2 자동 분기, timeout으로 무한대기 방지)
+            COMPOSE_FILE="/home/ubuntu/docker-compose-${{ env.TARGET_UPSTREAM }}.yml"
+            sudo -n ls -l "$COMPOSE_FILE"
+      
             if command -v docker-compose >/dev/null 2>&1; then
-              sudo -E docker-compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
+              timeout 180 sudo -nE docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
             else
-              sudo -E docker compose -f docker-compose-${{ env.TARGET_UPSTREAM }}.yml up -d --remove-orphans
+              timeout 180 sudo -nE docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             fi
-
-            sleep 3
-            sudo docker ps -a
+      
+            # 5) 상태 출력
+            sudo -n docker ps -a
 
       # 3) 헬스체크(퍼블릭 IP → 실패 시 로컬로 폴백)
       - name: Health check new target (run on EC2; public IP first)
