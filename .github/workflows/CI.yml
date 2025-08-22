@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 
-# 같은 브랜치에 연속 푸시되면 이전 작업 취소 → 대기시간 줄이기
+# 같은 브랜치에 연속 푸시되면 이전 작업 취소
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,6 +38,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
       - name: __trace:mark java+gradle
@@ -52,6 +53,22 @@ jobs:
         run: |
           NOW=$(date +%s); echo "$NOW $STEP_TS gradle-build" >> timings.txt; echo "STEP_TS=$NOW" >> "$GITHUB_ENV"
 
+      # ---- JAR 검증 & 아티팩트 업로드(디버그용) ----
+      - name: Assert JAR exists
+        run: |
+          echo "Listing build/libs:"
+          ls -l build/libs || true
+          JAR=$(ls -1 build/libs/*.jar | head -n1)
+          [ -f "$JAR" ] || (echo "❌ JAR not found in build/libs"; exit 1)
+          echo "✅ Found JAR: $JAR"
+
+      - name: Upload JAR artifact (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-jar
+          path: build/libs/*.jar
+          retention-days: 3
+
       # ---------- Docker: main push에서만 빌드/푸시 ----------
       - name: Set up Buildx
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -64,15 +81,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push image (cached)
+      - name: Build & Push image (cached, with SHA tag)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:${{ github.sha }}
           build-args: |
             JAR_FILE=build/libs/*.jar
+            VCS_REF=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -107,7 +130,6 @@ jobs:
     steps:
       # --- 1) Deploy target (login/pull/secret/compose up) ---
       - name: 1) Deploy target (login/pull/secret/compose up)
-      # 각 단계에서 upstream/ports 재감지
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
@@ -119,7 +141,7 @@ jobs:
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-  
+
             detect_upstream() {
               if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                 echo green
@@ -134,71 +156,73 @@ jobs:
             else
               CURRENT_UPSTREAM=green; CURRENT_PORT=8081; STOPPED_PORT=8080; TARGET_UPSTREAM=blue
             fi
-  
+
             T=15
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo timeout $T docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             sudo timeout 120 docker pull ${{ secrets.DOCKERHUB_USERNAME }}/workrun_server:latest
-  
+
             sudo mkdir -p /home/ubuntu/secrets
             echo '${{ secrets.APPLICATION_SECRET }}' | base64 -d | sudo tee /home/ubuntu/secrets/application-secret.yml >/dev/null
             sudo chmod 600 /home/ubuntu/secrets/application-secret.yml
-  
+
             cd /home/ubuntu
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             COMPOSE_FILE="docker-compose-${TARGET_UPSTREAM}.yml"
             ls -l "$COMPOSE_FILE"
-  
+
             if command -v docker-compose >/dev/null 2>&1; then
               sudo -E timeout 120 docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
             else
               sudo -E timeout 120 docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             fi
-  
-      # --- 2) Healthcheck only ---
-      - name: 2) Healthcheck (fail-fast with logs)
+
+      # --- 2) Healthcheck only (두 경로 시도) ---
+      - name: 2) Healthcheck (fail-fast with logs + image revision)
         uses: appleboy/ssh-action@v1.0.3
         with:
           username: ubuntu
           host: ${{ secrets.WORKRUN_SERVER_IP }}
           key: ${{ secrets.EC2_SSH_KEY }}
           timeout: 30s
-          command_timeout: 2m
+          command_timeout: 3m
           debug: true
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-  
-            detect_upstream() {
-              if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
-                echo green
-              else
-                sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
-              fi
-            }
-            UP=$(detect_upstream)
-            if [ "$UP" = "blue" ]; then
-              STOPPED_PORT=8081; TARGET_UPSTREAM=green
+
+            if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+              UP=green
             else
-              STOPPED_PORT=8080; TARGET_UPSTREAM=blue
+              UP=$(sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green')
             fi
-            echo "Healthcheck target: ${TARGET_UPSTREAM} on ${STOPPED_PORT}"
-  
-            URLS=("http://127.0.0.1:${STOPPED_PORT}/hc" "http://${{ secrets.WORKRUN_SERVER_IP }}:${STOPPED_PORT}/hc")
-            ok=false
-            for i in $(seq 1 10); do
-              for u in "${URLS[@]}"; do
-                if curl -fsS --max-time 2 "$u" >/dev/null; then echo "OK: $u"; ok=true; break; fi
-              done
-              [ "$ok" = true ] && break
-              echo "waiting app on ${STOPPED_PORT}... ($i/10)"; sleep 3
+            if [ "$UP" = "blue" ]; then
+              STOPPED_PORT=8081; TARGET=green
+            else
+              STOPPED_PORT=8080; TARGET=blue
+            fi
+            echo "Health target: $TARGET on $STOPPED_PORT"
+
+            # 컨테이너/포트/이미지 라벨 확인
+            sudo docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+            if sudo docker ps -q -f name=^$TARGET$ >/dev/null; then
+              CID=$(sudo docker ps -q -f name=^$TARGET$)
+              IMG_ID=$(sudo docker inspect -f '{{.Image}}' "$CID")
+              echo "Container $TARGET uses image id: $IMG_ID"
+              sudo docker inspect "$CID" --format '{{json .Config.Labels}}' || true
+            fi
+
+            # 앱 헬스 경로 2종 시도
+            HC_OK=false
+            for u in "http://127.0.0.1:${STOPPED_PORT}/hc" "http://127.0.0.1:${STOPPED_PORT}/actuator/health"; do
+              echo "Trying $u ..."
+              if curl -fsS --max-time 3 "$u" >/dev/null; then echo "✅ $u OK"; HC_OK=true; break; fi
             done
-            if [ "$ok" != true ]; then
-              echo "healthcheck FAILED. dumping logs..."
-              sudo timeout 10 docker ps -a || true
-              sudo timeout 10 docker logs --tail=200 "${TARGET_UPSTREAM}" || true
+            if [ "$HC_OK" != true ]; then
+              echo "❌ healthcheck failed on $STOPPED_PORT. dumping logs..."
+              sudo docker logs --tail=200 "$TARGET" || true
               exit 1
             fi
-  
+
       # --- 3) Nginx switch only ---
       - name: 3) Nginx switch (if running)
         uses: appleboy/ssh-action@v1.0.3
@@ -212,7 +236,7 @@ jobs:
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-  
+
             detect_upstream() {
               if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                 echo green
@@ -221,18 +245,33 @@ jobs:
               fi
             }
             UP=$(detect_upstream)
-            if [ "$UP" = "blue" ]; then
-              TARGET_UPSTREAM=green
-            else
-              TARGET_UPSTREAM=blue
-            fi
-  
+            if [ "$UP" = "blue" ]; then TARGET_UPSTREAM=green; else TARGET_UPSTREAM=blue; fi
+
             if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
               sudo docker exec -i nginxserver bash -lc "echo 'set \$service_url ${TARGET_UPSTREAM};' > /etc/nginx/conf.d/service-env.inc && nginx -t && nginx -s reload"
             else
               echo "nginxserver not running. skip reload."
             fi
-  
+
+      # --- 3.5) Nginx 설정/프록시 검증 ---
+      - name: 3.5) Nginx check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          username: ubuntu
+          host: ${{ secrets.WORKRUN_SERVER_IP }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 60s
+          debug: true
+          script: |
+            set -Eeuo pipefail
+            exec {BASH_XTRACEFD}>&2; set -x
+            if [ -n "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
+              sudo docker exec -i nginxserver bash -lc 'nginx -t && echo "[service-env.inc]:" && cat /etc/nginx/conf.d/service-env.inc && echo "[conf.d list]:" && ls -l /etc/nginx/conf.d && echo "[try proxy /hc]:" && (curl -fsS --max-time 3 http://127.0.0.1/hc || true)'
+            else
+              echo "nginxserver not running."
+            fi
+
       # --- 4) Cleanup old upstream (ignore errors) ---
       - name: 4) Stop old upstream
         uses: appleboy/ssh-action@v1.0.3
@@ -246,7 +285,7 @@ jobs:
           script: |
             set -Eeuo pipefail
             exec {BASH_XTRACEFD}>&2; set -x
-  
+
             detect_upstream() {
               if [ -z "$(sudo docker ps -q -f name=^nginxserver$ -f status=running)" ]; then
                 echo green
@@ -254,11 +293,6 @@ jobs:
                 sudo docker exec -i nginxserver bash -lc 'grep -oE "(blue|green)" /etc/nginx/conf.d/service-env.inc 2>/dev/null || echo green'
               fi
             }
-            # 전환 직후 현재 업스트림은 TARGET이 되었으니, 반대편을 정리
-            UP=$(detect_upstream)
-            if [ "$UP" = "blue" ]; then
-              OLD=green
-            else
-              OLD=blue
-            fi
+            NOW=$(detect_upstream)
+            if [ "$NOW" = "blue" ]; then OLD=green; else OLD=blue; fi
             sudo docker rm -f "$OLD" || true
