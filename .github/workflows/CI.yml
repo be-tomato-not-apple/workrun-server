@@ -72,8 +72,7 @@ jobs:
 
   deploy:
     needs: build
-    # 🔒 PR에서는 배포 금지. main에 push일 때만 실행
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # ⬅️ PR이면 전체 잡 스킵
     runs-on: ubuntu-latest
     steps:
       # 1) 현재 업스트림 감지(러너에서 native ssh) — 타임아웃 옵션 추가
