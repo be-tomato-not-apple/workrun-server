@@ -12,14 +12,6 @@ import lombok.NoArgsConstructor;
 public class FilteredWelfareDTO{
 
 
-	@Getter
-	@Builder
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class listDTO{
-		List<welfarePreview> filteredList = new ArrayList<>();
-
-	}
 
 	@Getter
 	@Builder

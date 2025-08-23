@@ -76,9 +76,14 @@ public class WelfareController {
 
     @PostMapping("/filtering")
     @Operation(summary = "복지정책 필터링 조회", description = "카테고리의 교집합에 해당하는 복지 정책을 반환합니다")
-    public ResponseEntity<ApiResponse<FilteredWelfareDTO.listDTO>> getFilteredWelfare(
-            @RequestBody FilterWelfareRequest dto
-    ) {
-        return null;
+    public ResponseEntity<ApiResponse<CursorPageResponse<FilteredWelfareDTO.welfarePreview>>> getFilteredWelfare(
+        @Parameter(description = "커서 (이전 마지막 항목의 ID, 첫 조회시 null)")
+        @RequestParam(required = false) Long cursor,
+        @Parameter(description = "조회할 개수")
+        @RequestParam(defaultValue = "20") int size,
+        @RequestBody FilterWelfareRequest dto) {
+        CursorPageResponse<FilteredWelfareDTO.welfarePreview> result = welfareService.getFilteredWelfares(cursor, size, dto);
+
+        return ResponseEntity.ok(ApiResponse.success(result));
     }
 }

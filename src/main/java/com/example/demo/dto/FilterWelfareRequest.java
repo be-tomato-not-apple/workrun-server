@@ -15,7 +15,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class FilterWelfareRequest {
 	private String keyword;
-	private List<String> homeStatusList;
-	private List<String> interestTopicList;
+	private List<String> homeStatusList = new ArrayList<>();
+	private List<String> interestTopicList = new ArrayList<>();
 
 }
