@@ -22,6 +22,7 @@ import java.util.List;
 @RequestMapping("/api/bookmarks")
 @RequiredArgsConstructor
 @Slf4j
+@CrossOrigin(origins = "http://localhost:3000")
 public class BookmarkController {
 
     private final BookmarkService bookmarkService;

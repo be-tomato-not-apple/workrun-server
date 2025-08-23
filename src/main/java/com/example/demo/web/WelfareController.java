@@ -24,6 +24,7 @@ import java.util.List;
 @RequiredArgsConstructor
 @RequestMapping("/api/welfares")
 @Slf4j
+@CrossOrigin(origins = "http://localhost:3000")
 public class WelfareController {
 
     private final WelfareService welfareService;
